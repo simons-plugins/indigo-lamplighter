@@ -8,7 +8,7 @@
 - **Type**: Indigo plugin
 - **Shortcut**: `lamplighter`
 - **Plugin id**: `com.simons-plugins.indigo-lamplighter`
-- **GitHub**: not yet created (local repo only until Simon says otherwise)
+- **GitHub**: https://github.com/simons-plugins/indigo-lamplighter
 - **Language**: Python 3.10+ (stdlib only — no bundled deps)
 
 ## Role in the workspace
