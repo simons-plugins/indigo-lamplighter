@@ -377,11 +377,10 @@ handler follows the configured level from startup.
    `lamplighter_controller` device (controllable from Domio, control pages,
    triggers and action groups), with the per-zone devices carrying their own
    enable underneath it.
-2. `lock zone` action in v1? PRD says yes; it costs nothing and scripts asked
-   for it.
-3. Unreadable lux sensor: treat as dark (lights on, safe for people) or as
-   bright (lights off, safe for bills)? PRD assumes a per-zone flag,
-   default dark.
+2. **Decided 2026-09-04: yes.** `lock zone` action ships in v1.
+3. **Decided 2026-09-04: dark.** An unreadable lux sensor makes the zone
+   dark (lights follow presence) and warns once; per-zone flag kept for the
+   garden-style zones where bright would be the safer failure.
 4. Keep the fork's per-period `lock_duration` override? Dropped in the schema
    above; say if a period needs a different override time.
 
