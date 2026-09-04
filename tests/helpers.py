@@ -4,6 +4,37 @@ Import as `from helpers import make_device` -- pytest puts `tests/` on
 sys.path (there is no `tests/__init__.py`).
 """
 
+import datetime
+
+
+class FixedSun:
+    """A `periods.SunProvider` whose sky never moves unless a test says so.
+
+    `sunrise` and `sunset` are each either a `datetime.time` or a callable
+    taking a date and returning one -- the callable form is how a test makes
+    sunset swing through the year, which is the only way to catch a period
+    that overlaps its neighbour in December and clears it in September.
+
+    Every question is recorded in `asked`, so a test can make "the code never
+    consulted the sun at all" fatal rather than inferring it from a value
+    that happened to look right.
+    """
+
+    def __init__(self, sunrise=datetime.time(6, 30), sunset=datetime.time(19, 45)):
+        self._sunrise = sunrise
+        self._sunset = sunset
+        self.asked = []
+
+    def sunrise(self, date):
+        return self._at("sunrise", self._sunrise, date)
+
+    def sunset(self, date):
+        return self._at("sunset", self._sunset, date)
+
+    def _at(self, kind, spec, date):
+        self.asked.append((kind, date))
+        return datetime.datetime.combine(date, spec(date) if callable(spec) else spec)
+
 
 def make_device(dev_id, device_cls="dimmer", **kwargs):
     """Create a stub indigo device and install it in `indigo.devices`.
