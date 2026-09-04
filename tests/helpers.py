@@ -95,6 +95,75 @@ def make_snapshot(dev_id, **kwargs):
     return snapshot
 
 
+def apply_level(device, level):
+    """Move a stub device to `level` the way real hardware eventually would.
+
+    Used by RecordingCommander(apply=...) and by tests that model a device
+    reporting back. `level` is an int 1-100, "on", "off", True or False --
+    the same vocabulary `zone.desired_levels()` speaks.
+    """
+    import indigo
+
+    wants_on = level not in ("off", False, 0)
+    if isinstance(device, indigo.DimmerDevice):
+        if level == "on" or level is True:
+            brightness = 100
+        elif level in ("off", False):
+            brightness = 0
+        else:
+            brightness = int(level)
+        device.brightness = brightness
+        device.states["brightness"] = brightness
+        wants_on = brightness > 0
+    device.onState = wants_on
+    device.onOffState = wants_on
+    device.states["onState"] = wants_on
+    device.states["onOffState"] = wants_on
+    return device
+
+
+class RecordingCommander:
+    """A `reconcile.Commander` that records instead of talking to Indigo.
+
+    `commands` is the list of `(device_id, level)` pairs in the order they
+    were sent, which is what nearly every reconcile promise asserts on --
+    "one command per device per pass" is a statement about this list.
+
+    `apply` decides whether the device actually MOVES when commanded: False
+    models hardware that has not reported back yet (the slow reporter, the
+    device that never lands), True models a light that answers instantly, and
+    a container of device ids models a room with one broken bulb in it. That
+    distinction is the difference between the backoff promises and the
+    one-command-per-pass promise, so it is a parameter rather than two
+    classes.
+    """
+
+    def __init__(self, apply=False):
+        self.apply = apply
+        self.commands = []
+
+    def _applies(self, device_id):
+        if isinstance(self.apply, bool):
+            return self.apply
+        return device_id in self.apply
+
+    def set_level(self, device, level):
+        self.commands.append((device.id, level))
+        if self._applies(device.id):
+            apply_level(device, level)
+
+    # -- the questions the tests ask -------------------------------------
+
+    def ids(self):
+        return [device_id for device_id, _level in self.commands]
+
+    def levels_for(self, device_id):
+        return [level for sent_id, level in self.commands if sent_id == device_id]
+
+    def clear(self):
+        self.commands.clear()
+
+
 def make_period(name, start, end, mode="on_and_off", levels=None, **extra):
     """One period as the config file writes it -- for make_zone() below."""
     return {
@@ -105,6 +174,35 @@ def make_period(name, start, end, mode="on_and_off", levels=None, **extra):
         "levels": levels if levels is not None else {"201": 60},
         **extra,
     }
+
+
+def make_zone_document(name="Study", periods=None, **zone_fields):
+    """One zone as the config file writes it, for make_config() below."""
+    document = {
+        "name": name,
+        "presence_devices": [101],
+        "hold_seconds": 300,
+        "lux": None,
+        "lights": [201],
+        "periods": periods if periods is not None else [make_period("Evening", "18:00", "23:00")],
+    }
+    document.update(zone_fields)
+    return document
+
+
+def make_config(zones, sun=None, today=None, **root):
+    """A whole `config.Config` through the loader, for engine tests.
+
+    Same reason as make_zone(): a Config assembled by hand can have a shape
+    the file could never produce, and a test against it proves something
+    about a configuration that cannot exist.
+    """
+    import datetime as _dt
+
+    from lamplighter.config import load_config
+
+    document = {"version": 1, "zones": list(zones), **root}
+    return load_config(document, sun or FixedSun(), today or _dt.date(2026, 9, 4))
 
 
 def make_zone(periods, sun=None, today=None, logger=None, clock=None, **zone_fields):

@@ -14,9 +14,11 @@ Ported from the Auto Lights fork's conftest with two deliberate changes.
 2. `indigo.server.calculateSunrise` / `calculateSunset` are present and
    return fixed times, so period resolution is testable without a server.
 
-Everything here is the minimum M0 needs. The engine (M1) will want command
-verbs -- `indigo.dimmer.setBrightness`, `indigo.device.turnOn/turnOff` -- and
-they belong in this file when the code that calls them exists, not before.
+3. `indigo.device.turnOn/turnOff` and `indigo.dimmer.setBrightness` exist and
+   actually move the stub device, because M1's `IndigoCommander` calls them.
+   They are the ONLY verbs the plugin has: there is no settle poll to fake, no
+   confirm call and no status request, so this is the whole write surface.
+   Most tests drive `helpers.RecordingCommander` instead and never reach here.
 """
 
 import datetime
@@ -132,6 +134,48 @@ def _calculate_sunset(date=None):
         day = day.date()
     return datetime.datetime.combine(day, FAKE_SUNSET_TIME)
 
+
+def _apply_on_off(dev, on):
+    """Move a stub device's on/off, attribute and states together.
+
+    Real Indigo keeps `dev.onState` and `dev.states["onOffState"]` in step;
+    a stub that moved only one of them would let a bug through in whichever
+    one the code under test does not read.
+    """
+    dev.onState = bool(on)
+    dev.onOffState = bool(on)
+    dev.states["onState"] = bool(on)
+    dev.states["onOffState"] = bool(on)
+
+
+def _turn_on(dev_id, **kwargs):
+    dev = indigo_stub.devices[dev_id]
+    _apply_on_off(dev, True)
+    if isinstance(dev, DimmerDevice) and not dev.brightness:
+        dev.brightness = 100
+        dev.states["brightness"] = 100
+    return dev
+
+
+def _turn_off(dev_id, **kwargs):
+    dev = indigo_stub.devices[dev_id]
+    _apply_on_off(dev, False)
+    if isinstance(dev, DimmerDevice):
+        dev.brightness = 0
+        dev.states["brightness"] = 0
+    return dev
+
+
+def _set_brightness(dev_id, value=None, **kwargs):
+    dev = indigo_stub.devices[dev_id]
+    dev.brightness = int(value)
+    dev.states["brightness"] = dev.brightness
+    _apply_on_off(dev, dev.brightness > 0)
+    return dev
+
+
+indigo_stub.device = types.SimpleNamespace(turnOn=_turn_on, turnOff=_turn_off)
+indigo_stub.dimmer = types.SimpleNamespace(setBrightness=_set_brightness)
 
 indigo_stub.devices = _Collection()
 indigo_stub.variables = _Collection()

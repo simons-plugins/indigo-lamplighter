@@ -11,19 +11,21 @@ import datetime as dt
 import logging
 
 import pytest
-from helpers import make_device, make_period, make_zone
+from helpers import (
+    RecordingCommander,
+    make_device,
+    make_period,
+    make_snapshot,
+    make_zone,
+)
 
 from lamplighter import compare
 from lamplighter.devices import DeviceGone, LookupFailed
 from lamplighter.zone import ZoneState
 
-# strict=True: the first stub that starts passing fails the suite.
-promise = pytest.mark.xfail(
-    strict=True, reason="M1: engine not built", raises=NotImplementedError
-)
-
 NOW = dt.datetime(2026, 9, 4, 20, 0, 0)
 LOGGER = "test.promises.degradation"
+LOG = logging.getLogger(LOGGER)
 
 
 @pytest.fixture(autouse=True)
@@ -168,8 +170,7 @@ def test_the_unreadable_warning_is_once_per_condition_not_once_per_pass(caplog):
         assert "dropped again" in caplog.records[1].getMessage()
 
 
-@promise
-def test_a_light_whose_state_cannot_be_read_is_excluded_from_override_detection():
+def test_a_light_whose_state_cannot_be_read_is_excluded_from_override_detection(caplog):
     """A device with neither a readable brightness nor a readable onState
     warns once and is excluded from override detection, but is still commanded
     and the zone keeps working for its other lights (R8).
@@ -178,9 +179,64 @@ def test_a_light_whose_state_cannot_be_read_is_excluded_from_override_detection(
     (it can then never override) or off-desired (it overrides constantly), and:
     drop the whole zone. The fork's fall-through here was a level-5 log line.
 
-    Override detection is not built at M1 phase B. Left as a stub.
+    Mutations applied, one at a time: compare.reading's dimmer branch `raise
+    UnreadableDevice(device_id, device_name, "no readable brightness on a
+    dimmable device")` -> `return 0` (the silent fall-through), and
+    override.is_manual_override's `except compare.UnreadableDevice as exc:
+    ... return False` -> `raise` (dropping the zone with the device).
     """
-    raise NotImplementedError
+    from lamplighter.override import EchoBook, is_manual_override
+    from lamplighter.reconcile import Reconciler
+
+    zone = a_zone()
+    zone.ingest_presence(101, True, NOW)
+    zone.ingest_lux(1800, NOW)
+    assert zone.evaluate(NOW, "startup").to_state is ZoneState.OCCUPIED
+    assert zone.desired_levels(NOW) == {201: 60, 202: 30}
+
+    live = make_device(201, "dimmer", brightness=60, name="Desk Lamp")
+    broken = make_device(202, "dimmer", brightness=0, name="Ghost Lamp")
+    broken.brightness = None  # neither a brightness nor an onState worth reading
+
+    def snapshots(dev_id, before, after, name):
+        return (
+            make_snapshot(dev_id, brightness=before, name=name),
+            make_snapshot(dev_id, brightness=after, name=name),
+        )
+
+    book = EchoBook()
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        for _attempt in range(5):
+            previous, current = snapshots(202, 30, 5, "Ghost Lamp")
+            previous.brightness = None
+            current.brightness = None
+            assert (
+                is_manual_override(zone, previous, current, NOW, book, 15, LOG) is False
+            ), "an unreadable device must not be judged at all"
+
+    assert len(caplog.records) == 1, "once per condition per device (section 10)"
+    message = caplog.records[0].getMessage()
+    assert "Ghost Lamp" in message and "202" in message
+    assert "cannot be read" in message
+    assert "excluded from override detection" in message
+    assert "still command" in message, (
+        "the warning must say the device is still driven; a reader who takes "
+        "'excluded' to mean 'dropped' goes looking for the wrong fault"
+    )
+
+    # The zone keeps working for its other lights: a real move on 201 lands.
+    previous, current = snapshots(201, 60, 20, "Desk Lamp")
+    assert is_manual_override(zone, previous, current, NOW, book, 15, LOG) is True
+
+    # ...and the unreadable one is still commanded, because we cannot tell
+    # that it is where we want it (section 5.9).
+    commander = RecordingCommander(apply=False)
+    Reconciler(commander, book, LOG).run(zone, NOW)
+    assert commander.commands == [(202, 30)], (
+        "an unreadable light was dropped from the plan; it is excluded from "
+        "override DETECTION, not from the zone"
+    )
+    assert live.brightness == 60
 
 
 def test_an_indigo_lookup_failure_is_not_reported_as_device_gone(monkeypatch, caplog):
@@ -244,17 +300,54 @@ def test_an_indigo_lookup_failure_is_not_reported_as_device_gone(monkeypatch, ca
     assert set(zone.resolve_lights().live) == {201, 202}
 
 
-@promise
-def test_recording_a_command_never_costs_the_command():
+def test_recording_a_command_never_costs_the_command(caplog):
     """If the pre-command state cannot be read, the command is still sent; the
     device loses its echo record, not its write (R3, R8).
 
     Kills: record first and send inside the same try, so an unreadable device
     is never commanded at all.
 
-    Commands are not built at M1 phase B. Left as a stub.
+    Mutation applied: reconcile.Reconciler.run's guarded
+    `note_pre_command(...)` block -> a bare
+    `self.echo_book.note_pre_command(device_id, compare.reading(device), now)`
+    on the line before `self.commander.set_level(device, level)`.
     """
-    raise NotImplementedError
+    from lamplighter.override import EchoBook
+    from lamplighter.reconcile import Reconciler
+
+    zone = a_zone()
+    zone.ingest_presence(101, True, NOW)
+    zone.ingest_lux(1800, NOW)
+    assert zone.evaluate(NOW, "startup").to_state is ZoneState.OCCUPIED
+
+    make_device(201, "dimmer", brightness=60, name="Desk Lamp")  # already at desired
+    broken = make_device(202, "dimmer", brightness=0, name="Ghost Lamp")
+    broken.brightness = None
+
+    book = EchoBook()
+    commander = RecordingCommander(apply=False)
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        sent = Reconciler(commander, book, LOG).run(zone, NOW)
+
+    assert commander.commands == [(202, 30)], (
+        "the unreadable device lost its command, not just its record; a plugin "
+        "that stops driving a light because it cannot read it is a plugin that "
+        "gives up on exactly the lights that need it"
+    )
+    assert [command.device_id for command in sent] == [202]
+    assert sent[0].actual is None, "unreadable is reported as no reading, never as 0"
+
+    assert book.pending(202) == (), (
+        "a wrong record is worse than none: it would excuse a transition that "
+        "was never ours"
+    )
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "Ghost Lamp" in message
+    assert "no record of the state it was commanded away from" in message
+    assert "read as a manual override" in message, (
+        "the warning must name the consequence, not just the condition"
+    )
 
 
 def test_a_stale_lux_reading_says_so():

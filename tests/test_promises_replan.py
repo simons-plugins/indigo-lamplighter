@@ -13,15 +13,19 @@ import datetime as dt
 import logging
 
 import pytest
-from helpers import make_period, make_zone
+from helpers import (
+    FixedSun,
+    RecordingCommander,
+    make_config,
+    make_period,
+    make_snapshot,
+    make_zone,
+    make_zone_document,
+)
 
 from lamplighter import compare
+from lamplighter.engine import Engine
 from lamplighter.zone import ZoneState
-
-# strict=True: the first stub that starts passing fails the suite.
-promise = pytest.mark.xfail(
-    strict=True, reason="M1: engine not built", raises=NotImplementedError
-)
 
 NOW = dt.datetime(2026, 9, 4, 20, 0, 0)
 LUX = {"device": 302, "dark_below": 2200, "hysteresis": 300}
@@ -47,6 +51,51 @@ def a_zone(periods=None, **fields):
         logger=logging.getLogger("test.promises.replan"),
         **fields,
     )
+
+
+def an_engine(periods=None, **fields):
+    """The same zone, behind the engine that classifies its events.
+
+    The two promises below are about the classification -- which
+    `deviceUpdated` becomes an input at all -- so they need the callback path,
+    not just the zone.
+    """
+    fields.setdefault("lights", [201, 202])
+    fields.setdefault("presence_devices", [101, 102])
+    fields.setdefault("lux", dict(LUX))
+    sun = FixedSun()
+    config = make_config(
+        [
+            make_zone_document(
+                periods=periods
+                or [make_period("Evening", "18:00", "23:00", levels={"201": 60, "202": 30})],
+                **fields,
+            )
+        ],
+        sun=sun,
+    )
+    engine = Engine(
+        config,
+        sun,
+        RecordingCommander(apply=True),
+        logger=logging.getLogger("test.promises.replan"),
+        clock=lambda: NOW,
+    )
+    return engine, engine.zones["Study"]
+
+
+def state_only_presence(dev_id, on):
+    """A presence snapshot whose on/off lives ONLY in states["onOffState"].
+
+    Plenty of third-party plugins report on/off that way and expose no
+    `onState` attribute on the Device object at all. A gate that reads the
+    attribute -- which is what gating on the diff's keys amounts to -- goes
+    permanently deaf to every one of them.
+    """
+    snapshot = make_snapshot(dev_id, device_cls="device", onState=on)
+    del snapshot.onState
+    del snapshot.states["onState"]
+    return snapshot
 
 
 def test_a_presence_device_re_reporting_on_does_not_replan():
@@ -78,18 +127,42 @@ def test_a_presence_device_re_reporting_on_does_not_replan():
     assert zone.presence.last_seen == at(seconds=120)
 
 
-@promise
 def test_a_display_string_or_timer_update_does_not_replan():
     """An update that touches only a display string, an uptime counter or a
     battery level changes no input and causes no re-plan.
 
     Kills: treat every deviceUpdated for a zone member as an input edge.
 
-    M1 phase B builds the zone's inputs; deciding WHICH deviceUpdated
-    reaches ingest_presence/ingest_lux is the engine's event classification,
-    which is not built yet. Left as a stub deliberately.
+    Mutation applied: engine.Engine._presence_changed's `if previous_dev is
+    not None and presence_reading(previous_dev) == presence_reading(
+    current_dev):` -> `if False:`, which is the fork routing every update of a
+    zone member straight to process_zone.
     """
-    raise NotImplementedError
+    engine, zone = an_engine()
+    engine.mark_all_dirty("startup")
+    zone.ingest_presence(101, True, NOW)
+    assert engine.tick(NOW).transitions, "precondition: the zone is running"
+
+    # "Not an edge" is made fatal rather than inferred from a quiet tick: the
+    # zone must never be told about this event at all.
+    def fatal(*args, **kwargs):
+        raise AssertionError(
+            "the engine fed a no-op update into the zone's inputs; the "
+            "Occupatum countdown ticks like this once a second"
+        )
+
+    zone.ingest_presence = fatal
+    zone.ingest_lux = fatal
+
+    # The Occupatum countdown, twice a second for a minute. Same reading every
+    # time; only the display string and the timer move.
+    for tick in range(1, 121):
+        previous = make_snapshot(101, onState=True, displayStateValUi=f"Delay {300 - tick}.0")
+        current = make_snapshot(101, onState=True, displayStateValUi=f"Delay {299 - tick}.0")
+        current.states["batteryLevel"] = 87
+        assert engine.device_updated(previous, current, at(seconds=tick)) == []
+
+    assert engine.dirty == {}, "no zone was marked for a re-plan"
 
 
 def test_a_genuine_presence_edge_replans_exactly_once():
@@ -235,7 +308,6 @@ def test_a_period_boundary_replans_with_no_device_event_at_all():
     assert zone.desired_levels(boundary) == {201: "leave", 202: "leave"}
 
 
-@promise
 def test_the_edge_gate_reads_the_before_and_after_snapshots():
     """The gate compares the two snapshots Indigo hands the callback, in both
     directions.
@@ -245,8 +317,45 @@ def test_the_edge_gate_reads_the_before_and_after_snapshots():
     moved -- a zone can be woken by a key it does not care about and left
     asleep through a change carried in a key it does.
 
-    M1 phase B builds the zone's inputs; the gate that turns an origDev /
-    newDev pair into one of those inputs is the engine's event
-    classification, which is not built yet. Left as a stub deliberately.
+    The engine has no diff to gate on -- the classification reads the
+    snapshots by construction -- so the promise is expressed as the two
+    properties a key-based gate gets wrong: a change carried in a state the
+    attribute does not mirror IS an edge, and two distinct objects with equal
+    readings are NOT one however much else about them differs.
+
+    Mutations applied, one at a time: engine.Engine._presence_changed's
+    reading comparison -> `getattr(previous_dev, "onState", None) ==
+    getattr(current_dev, "onState", None)` (the attribute alone, which is
+    what a key-based gate amounts to), and -> `previous_dev is current_dev`
+    (identity, which lets every no-op tick through).
     """
-    raise NotImplementedError
+    engine, zone = an_engine()
+
+    # Direction 1: a plugin device that carries on/off ONLY in its states
+    # mapping, with no onState attribute at all. Plenty of them do.
+    previous = state_only_presence(101, on=False)
+    current = state_only_presence(101, on=True)
+    assert getattr(previous, "onState", None) is None
+    assert getattr(current, "onState", None) is None
+
+    edges = engine.device_updated(previous, current, NOW)
+    assert [edge.kind for edge in edges] == ["presence"], (
+        "a genuine presence transition was missed because it was carried in "
+        "a state the attribute does not mirror"
+    )
+    assert zone.presence.last_seen == NOW
+
+    # Direction 2: two distinct objects, every reading equal. Indigo hands the
+    # callback a fresh pair of objects for every update, so object identity
+    # says nothing at all about whether anything moved.
+    engine.tick(NOW)
+    quiet_before = make_snapshot(101, onState=True)
+    quiet_after = make_snapshot(101, onState=True)
+    quiet_after.lastChanged = dt.datetime(2026, 9, 4, 20, 0, 30)
+    assert quiet_before is not quiet_after
+
+    zone.ingest_presence = lambda *a, **k: pytest.fail(
+        "two snapshots with identical readings were treated as an edge"
+    )
+    assert engine.device_updated(quiet_before, quiet_after, at(seconds=30)) == []
+    assert engine.dirty == {}

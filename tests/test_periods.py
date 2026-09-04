@@ -153,8 +153,9 @@ def test_a_gap_between_periods_has_no_active_period():
     """Kills: fall back to the nearest or the last period, which turns a
     deliberate gap into a silently extended band.
 
-    The desired-levels half of this promise (OFF-DUTY means `leave` for every
-    device) belongs to the planner and is still an xfail stub.
+    The desired-levels half of this promise (OFF-DUTY with cause `no_period`
+    means `leave` for every device) belongs to the planner and lives in
+    tests/test_promises_periods.py.
     """
     periods = [band("Morning", "06:00", "09:00"), band("Evening", "19:00", "22:00")]
     assert active_period(periods, dt.datetime(2026, 9, 4, 13, 0), SUN) is None
