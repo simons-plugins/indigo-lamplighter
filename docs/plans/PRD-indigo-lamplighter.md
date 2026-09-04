@@ -172,7 +172,9 @@ that fed the decision (R14).
 
 Per device per period: `int 1..100 | "on" | "off" | "leave"`. Optional per
 period: `limit` (cap for every device), `adjust_by_lux` (level = f(lux) for
-devices without an explicit int). `leave` means the plugin never writes the
+devices without an explicit int), and `override` (`duration_minutes`,
+`extend_minutes`) replacing the zone's override timing while the period is
+active. `leave` means the plugin never writes the
 device in that period, in any state; `off` means it is turned off in VACANT
 and OFF-DUTY and to its level in OCCUPIED.
 
@@ -259,6 +261,7 @@ presence survive an edit.
          "levels": {"772478931": "leave", "1256902388": "leave",
                     "1894385558": 10, "1990903005": 10, "144694384": 30}},
         {"name": "Dusk", "from": "sunset-30m", "to": "19:00", "mode": "on_and_off",
+         "override": {"duration_minutes": 120, "extend_minutes": 30},
          "levels": {"772478931": 50, "1256902388": 50, "1894385558": 60,
                     "1990903005": 60, "144694384": 100}}
       ]
@@ -381,8 +384,11 @@ handler follows the configured level from startup.
 3. **Decided 2026-09-04: dark.** An unreadable lux sensor makes the zone
    dark (lights follow presence) and warns once; per-zone flag kept for the
    garden-style zones where bright would be the safer failure.
-4. Keep the fork's per-period `lock_duration` override? Dropped in the schema
-   above; say if a period needs a different override time.
+4. **Decided 2026-09-04: kept.** A period may carry its own `override`
+   block (`duration_minutes`, `extend_minutes`) that replaces the zone's while
+   that period is active — for example a longer hold during a Dining evening
+   period so a meal that runs late is not reverted mid-course. Absent, the
+   zone's values apply.
 
 ## 12. v2 candidates
 
