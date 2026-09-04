@@ -354,9 +354,11 @@ Must-have promises (the fork's numbering in brackets):
 - **Persistence on device states.** Indigo device states are strings/numbers;
   timestamps need a fixed ISO format and a version key. Mitigation: a single
   `persist.py` with round-trip tests.
-- **Sunrise/sunset API shape.** Verify `indigo.server.calculateSunrise()`
-  semantics (timezone, date argument) before M2; fall back to a fixed time
-  with a warning if unavailable.
+- **Sunrise/sunset API shape.** `indigo.server.calculateSunrise(date)` /
+  `calculateSunset(date)` take a `datetime.date` and return a `datetime`
+  (verified against the 2025.2 IOM reference). Timezone of the returned
+  value still to be checked on jarvis before M2; fall back to a fixed time
+  with a warning if the call fails.
 - **The temptation to add a settle poll back.** If a device does not confirm,
   the answer is the reconcile tick, not a thread. Written down here so the
   first flaky device does not reintroduce §5.8's predecessor.
