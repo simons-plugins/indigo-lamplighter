@@ -1,0 +1,28 @@
+# Project metadata and test configuration for Lamplighter.
+#
+# The plugin itself is stdlib only and is not a Python package that gets built
+# or installed: it ships as an Indigo bundle. There is deliberately no
+# [build-system] table. jsonschema appears only in the dev extra, where it
+# validates examples/lamplighter.example.json against the bundled schema; the
+# plugin's own loader validates without it.
+
+[project]
+name = "indigo-lamplighter"
+version = "0.0.0"
+description = "Presence- and daylight-driven lighting for Indigo"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "jsonschema>=4.21",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Strict xfail: a stub that starts passing is a FAILURE, not a quiet pass.
+# The acceptance suite is written as xfail stubs ahead of the engine (M0), so
+# this is what makes M1 land promise by promise instead of all at once.
+xfail_strict = true
+addopts = "-ra"

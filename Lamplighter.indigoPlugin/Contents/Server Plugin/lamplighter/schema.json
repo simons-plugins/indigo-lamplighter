@@ -1,0 +1,268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/simons-plugins/indigo-lamplighter/schema/lamplighter.schema.json",
+  "title": "Lamplighter configuration",
+  "description": "Configuration for the Lamplighter Indigo plugin (com.simons-plugins.indigo-lamplighter). One file, hot-reloaded from Preferences/com.simons-plugins.indigo-lamplighter/lamplighter.json, describing every lighting zone. A zone is a state machine over four inputs -- presence, lux, period, override -- and this file supplies all four. Nothing here is read from live device state: the plugin never decides by diffing what a light IS against what it should be (PRD section 1). Cross-field rules this schema cannot express are checked by the loader, which names the offending path and refuses to load rather than falling back to a default: unique zone names, levels keys being members of the zone's lights, and periods not overlapping at any minute of the year (R11, R15).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "zones"],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Schema version of this file. Exactly 1. The loader refuses any other value rather than guessing at the shape, so a future format change can never be half-read (R15)."
+    },
+    "reconcile_seconds": {
+      "type": "integer",
+      "minimum": 10,
+      "default": 60,
+      "description": "How often the worker re-checks every enabled zone and re-commands devices that are still off their desired level (PRD section 5.8). This tick is the ONLY retry mechanism: there is no settle poll, no confirm thread and no suppression list, so a device that misses a command waits at most this long. Default 60. Lower values make a slow device recover sooner and cost one comparison per light per tick; below 10 s the tick starts to look like the settle-poll this design deleted."
+    },
+    "echo_window_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120,
+      "default": 15,
+      "description": "How long a state the plugin commanded a device AWAY from stays on record as an excuse for one transition (R3). An echo of our own command can arrive after the desired level has already moved back onto the device's pre-command state; without this window that echo reads as a manual override. Each recorded command excuses exactly one transition and then is consumed. Default 15. Longer windows forgive slower hardware but also swallow a genuine dial move made within the window (the documented cost, fork test M12d)."
+    },
+    "zones": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The lighting zones. Zone names must be unique -- the loader rejects duplicates, because zone state is persisted under the name (R13). A zone with no configuration here is a zone the plugin does not touch at all, which is how migration from the Auto Lights fork proceeds one room at a time.",
+      "items": { "$ref": "#/$defs/zone" }
+    }
+  },
+  "$defs": {
+    "device_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "An Indigo device id (the integer shown in Indigo's device list, not the name). Names are not accepted: they change, ids do not. An id that does not resolve at load time warns once and the zone keeps running for its other devices (R15) -- a failure to LOOK UP a device is reported as a lookup failure, never as 'device gone'."
+    },
+    "time_expression": {
+      "type": "string",
+      "pattern": "^(?:(?:[01][0-9]|2[0-3]):[0-5][0-9]|(?:sunrise|sunset)(?:[+-](?:[0-9]{1,3}m|[0-9]{1,2}h(?:[0-5]?[0-9]m)?))?)$",
+      "examples": [
+        "00:00",
+        "06:30",
+        "19:00",
+        "23:59",
+        "sunrise",
+        "sunset",
+        "sunset-30m",
+        "sunset+45m",
+        "sunset-1h",
+        "sunrise+1h30m",
+        "sunset-2h15m"
+      ],
+      "description": "A time of day, either absolute or relative to today's sunrise/sunset (R11). Three forms, and only these three: 'HH:MM' in 24-hour clock with a leading zero ('06:30', not '6:30'); the bare words 'sunrise' or 'sunset'; or either word with an offset. An offset is minutes only ('+30m', '-90m'), hours only ('-1h', '+2h'), or hours and minutes ('+1h30m', '-2h15m'); the unit letter is always written, so '-1h30' and '+90' are not offsets. Sunrise and sunset come from indigo.server.calculateSunrise/calculateSunset for the date being resolved; if that call fails the plugin warns and falls back to a fixed time rather than silently skipping the period (R15)."
+    },
+    "level": {
+      "description": "What one light should do in one period (R12). An integer 1-100 is a brightness percentage; a relay treats any integer as 'on'. 'on' means full/on without naming a percentage. 'off' means force off: the light is turned off in VACANT and OFF-DUTY, and in OCCUPIED it is held off. 'leave' means the plugin never writes this device during this period, in any state -- not on, not off, not at reconcile. 'leave' and 'off' are separate settings on purpose: in the fork they were a boolean plus a zone-wide off_lights_behavior pairing that only worked in one combination.",
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Brightness percentage. 0 is not a level -- use \"off\" to force the light off, or \"leave\" to not touch it, so that 'dark' and 'don't care' can never be confused."
+        },
+        {
+          "type": "string",
+          "enum": ["on", "off", "leave"],
+          "description": "on = turn on (full for a dimmer); off = force off; leave = never write this device in this period."
+        }
+      ]
+    },
+    "lux": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["device", "dark_below"],
+      "description": "Daylight gate for the zone, or null for no gate at all (R9). Written as one nullable schema rather than a oneOf so that a mistake INSIDE the object is reported at its own path ('zones/0/lux/when_unreadable') instead of collapsing into 'this is not a valid lux block' at the zone (R15). Dark is a Schmitt trigger, not a threshold: the zone becomes dark below 'dark_below' and only becomes bright again above 'dark_below + hysteresis'. The band applies only on the way OUT of dark, because the zone's own lights raise the reading at a sensor that lives in the room they light. Null instead of this object means the zone has no daylight gate at all and follows presence around the clock.",
+      "properties": {
+        "device": {
+          "$ref": "#/$defs/device_id",
+          "description": "The Indigo device whose sensorValue is the zone's lux reading."
+        },
+        "dark_below": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Below this reading the zone is dark and its lights follow presence. Compared against the sensor's raw sensorValue, in whatever units that device reports."
+        },
+        "dark_below_variable_id": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional Indigo VARIABLE id whose numeric value overrides 'dark_below' while it can be read as a number -- the way the Kitchen threshold is tuned from a control page without editing this file. If the variable is missing or unparseable the plugin warns once and uses 'dark_below'; it never treats an unreadable variable as zero (R15)."
+        },
+        "hysteresis": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0,
+          "description": "How far above 'dark_below' the reading must climb before the zone is called bright again (R9). Must be wider than the lift the zone's own lights produce at this sensor, or the zone oscillates: lights on -> reading rises -> not dark -> lights off. The Kitchen needs 300 for a +100..200 lux lift. Default 0, which means no band -- correct only for a sensor the zone's lights cannot reach."
+        },
+        "when_unreadable": {
+          "type": "string",
+          "enum": ["dark", "bright"],
+          "default": "dark",
+          "description": "What the zone believes when the lux device cannot be read at all (PRD section 11, decision 3). 'dark' (the default) means the lights keep following presence, so an indoor room does not go dark because a sensor dropped off the mesh. 'bright' means the zone goes off duty, which is the safer failure for a garden or any zone where a stuck-on light is the worse outcome. Either way the plugin warns once per condition per device and says so in the zone's explain line -- an unreadable sensor is never a silent 'not dark' (R15)."
+        }
+      }
+    },
+    "zone_override": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How a manual override (a wall dimmer, a wireless button, the app, a voice command) is held and released for this zone (R10). The override itself is detected from the device-change transition, never from a live re-read (R1). Omit this object to accept the defaults below.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether this zone can be overridden at all. false means the zone NEVER locks: manual changes are noticed but the zone keeps commanding its desired levels, which is what a hallway with one light on a timer wants. Default true."
+        },
+        "duration_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60,
+          "description": "How long an override holds before it is reconsidered. At expiry, with the room still occupied, it extends by 'extend_minutes'; with the room empty it ends and the zone resumes. Default 60."
+        },
+        "extend_minutes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "How much longer an override holds each time it expires while presence is still active (R10). 0 means an override in an occupied room ends at 'duration_minutes' regardless -- fine for a bathroom, wrong for a dining room where a meal runs long. Default 0."
+        },
+        "unlock_on_leave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether an override is released as soon as the zone's own presence hold expires, without waiting for 'duration_minutes' (R10). Uses this zone's presence hold, so it works for an override created while the room was occupied -- the fork armed it only for overrides created in an already-empty room (fork #17). Default true."
+        },
+        "exclude": {
+          "type": "array",
+          "uniqueItems": true,
+          "default": [],
+          "description": "Lights in this zone that can never CREATE an override, though they are still commanded normally (R6). For a device whose reports arrive tens of seconds late, or a group that reads back a few points low outside the band: it would otherwise lock its own zone with its own echo. Prefer widening nothing and listing the device here.",
+          "items": { "$ref": "#/$defs/device_id" }
+        }
+      }
+    },
+    "period_override": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration_minutes", "extend_minutes"],
+      "description": "Override timing that REPLACES the zone's while this period is active (PRD section 11, decision 4) -- a longer hold during a Dining evening period so a meal that runs late is not reverted mid-course. Both fields are required because this block replaces the zone's timing rather than merging into it; a half-specified block would leave which value applies ambiguous. Whether the zone can be overridden at all, which devices are excluded, and unlock-on-leave stay with the zone.",
+      "properties": {
+        "duration_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How long an override holds while this period is active. Replaces the zone's 'override.duration_minutes'."
+        },
+        "extend_minutes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How much longer an override holds at each expiry with presence still active, while this period is active. Replaces the zone's 'override.extend_minutes'."
+        }
+      }
+    },
+    "period": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "from", "to", "mode", "levels"],
+      "description": "One band of the day with its own per-device levels (R11, R12). Periods within a zone must not overlap at any minute of the year -- the loader resolves today's and tomorrow's instances of every period and rejects an overlap by naming the offending pair, rather than silently taking the first match. A time not covered by any period leaves the zone OFF-DUTY.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Human name for this band ('Overnight', 'Dusk'). Appears in the zone's 'period' state and in every log line that names the cause of a re-plan (R14), so make it the name you would want to read in the event log."
+        },
+        "from": {
+          "$ref": "#/$defs/time_expression",
+          "description": "When the period starts, INCLUSIVE. May be sunrise/sunset-relative."
+        },
+        "to": {
+          "$ref": "#/$defs/time_expression",
+          "description": "When the period ends, EXCLUSIVE -- so one period may end at '19:00' and the next begin at '19:00' with no overlap. If 'to' is earlier than 'from' the period crosses midnight ('22:00' to '06:00'). '00:00' as 'to' means midnight at the END of the period (24:00), so a period ending at midnight does not count as crossing."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["on_and_off", "off_only"],
+          "description": "'on_and_off': the zone turns its lights on when the room is occupied and dark, and off when it empties. 'off_only': the zone never turns a light on during this period, only off -- one hard-off band expresses what the fork needed two periods to say (R11). Fork parity; there is deliberately no 'on only'."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Optional cap applied to every device level in this period after all other calculation, including 'adjust_by_lux'. A device configured at 100 in a period with 'limit': 60 is commanded to 60. Absent means no cap. This is the fork's limit_brightness, which there only took effect inside the adjust-brightness branch."
+        },
+        "adjust_by_lux": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether devices WITHOUT an explicit integer level are scaled by how dark the room is: darker room, higher level. Devices given an integer, 'on', 'off' or 'leave' in 'levels' are unaffected. Requires the zone to have a lux block; without one the plugin warns and treats this as false rather than scaling against a missing reading (R15). Default false."
+        },
+        "override": {
+          "$ref": "#/$defs/period_override",
+          "description": "Optional override timing that replaces the zone's while this period is active. Absent, the zone's 'override' values apply."
+        },
+        "levels": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[1-9][0-9]*$",
+            "description": "An Indigo device id written as a string, because JSON object keys are strings. Every key must be a member of this zone's 'lights' -- the loader rejects a key that is not, naming it, rather than writing to a device the zone does not own."
+          },
+          "additionalProperties": { "$ref": "#/$defs/level" },
+          "description": "What each light does in this period, keyed by device id as a string (R12). A light in the zone's 'lights' that is ABSENT from this object is treated as 'leave': the plugin does not write it during this period. Listing it with 'leave' means the same thing and documents the intent; listing it with 'off' is different -- that forces it off."
+        }
+      }
+    },
+    "zone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "presence_devices", "hold_seconds", "lux", "lights", "periods"],
+      "description": "One lighting zone: a set of lights driven by a set of presence sensors, gated by daylight, through a ladder of periods. 'lux' is required-but-nullable rather than optional so that a zone with no daylight gate says so explicitly instead of acquiring one by omission.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "The zone's name. Must be unique across zones (the loader rejects duplicates): it names the zone's Indigo device, its persisted state and every log line, so a rename is a state reset."
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether this zone runs. false means the zone is parsed, gets its Indigo device and keeps its persisted state, but neither plans nor writes -- how a zone sits in this file while the Auto Lights fork still drives its lights during migration. The lamplighter_controller device's global enable sits above this. Default true."
+        },
+        "presence_devices": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Any Indigo devices with an on/off state, combined any-of: one reporting on is presence (PRD section 5.4). Raw PIRs, mmWave radar, door contacts, or an Occupatum zone device during migration. Presence hold lives in this zone (see 'hold_seconds'), so raw sensors need no second plugin to say 'still here'.",
+          "items": { "$ref": "#/$defs/device_id" }
+        },
+        "hold_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "description": "How long after the last 'on' reading presence stays active for this zone (PRD section 5.4). A PIR with a 10 s hardware hold and 300 here behaves like an Occupatum zone with a 300 s off-delay, without a device that ticks every 1.2 s. Also the clock that unlock-on-leave uses (R10). Required with no default: the fork's worst behaviour came from a hold that was somewhere else."
+        },
+        "lux": {
+          "$ref": "#/$defs/lux",
+          "description": "The zone's daylight gate, or null for a zone that follows presence around the clock (a hallway, an interior room with no window). Required, so that 'no gate' is a stated decision rather than an omission."
+        },
+        "lights": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Every light this zone may command. A device not listed here is never written by this zone and can never create an override for it. Periods give these devices their levels; a light with no level in the active period is left alone.",
+          "items": { "$ref": "#/$defs/device_id" }
+        },
+        "override": {
+          "$ref": "#/$defs/zone_override",
+          "description": "Manual-override behaviour for this zone (R10). Omit for the defaults: overridable, 60 minutes, no extension, released when the room empties."
+        },
+        "periods": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The zone's day, as bands that must not overlap (R11). Gaps are allowed and mean OFF-DUTY: no period, no writes.",
+          "items": { "$ref": "#/$defs/period" }
+        }
+      }
+    }
+  }
+}

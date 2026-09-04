@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "reconcile_seconds": 60,
+  "echo_window_seconds": 15,
+  "zones": [
+    {
+      "name": "Kitchen",
+      "enabled": true,
+      "presence_devices": [1465867145, 735515977, 710473944, 1544029753],
+      "hold_seconds": 300,
+      "lux": {
+        "device": 1616814762,
+        "dark_below": 2200,
+        "dark_below_variable_id": 1053866700,
+        "hysteresis": 300,
+        "when_unreadable": "dark"
+      },
+      "lights": [772478931, 1256902388, 1894385558, 1990903005, 144694384],
+      "override": {
+        "enabled": true,
+        "duration_minutes": 60,
+        "extend_minutes": 30,
+        "unlock_on_leave": true,
+        "exclude": []
+      },
+      "periods": [
+        {
+          "name": "Overnight",
+          "from": "00:00",
+          "to": "06:00",
+          "mode": "on_and_off",
+          "levels": {
+            "772478931": "leave",
+            "1256902388": "leave",
+            "1894385558": 10,
+            "1990903005": 10,
+            "144694384": 30
+          }
+        },
+        {
+          "name": "Daytime",
+          "from": "06:00",
+          "to": "sunset-30m",
+          "mode": "on_and_off",
+          "limit": 80,
+          "adjust_by_lux": true,
+          "levels": {
+            "772478931": "on",
+            "1256902388": "on",
+            "1894385558": 100,
+            "1990903005": 100,
+            "144694384": 100
+          }
+        },
+        {
+          "name": "Dusk",
+          "from": "sunset-30m",
+          "to": "00:00",
+          "mode": "on_and_off",
+          "override": {
+            "duration_minutes": 120,
+            "extend_minutes": 30
+          },
+          "levels": {
+            "772478931": 50,
+            "1256902388": 50,
+            "1894385558": 60,
+            "1990903005": 60,
+            "144694384": 100
+          }
+        }
+      ]
+    },
+    {
+      "name": "Hallway",
+      "enabled": true,
+      "presence_devices": [1204551893],
+      "hold_seconds": 120,
+      "lux": null,
+      "lights": [1877450320],
+      "override": {
+        "enabled": false
+      },
+      "periods": [
+        {
+          "name": "Evening",
+          "from": "sunset-15m",
+          "to": "22:30",
+          "mode": "on_and_off",
+          "levels": {
+            "1877450320": "on"
+          }
+        },
+        {
+          "name": "Overnight",
+          "from": "22:30",
+          "to": "07:00",
+          "mode": "off_only",
+          "levels": {
+            "1877450320": "off"
+          }
+        }
+      ]
+    }
+  ]
+}

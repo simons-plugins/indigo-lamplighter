@@ -1,0 +1,5 @@
+# Development-only. The plugin itself is stdlib only.
+pytest>=8.0
+# Validates examples/lamplighter.example.json against the bundled schema in
+# tests/test_schema.py. The plugin's own config loader does not use it.
+jsonschema>=4.21
