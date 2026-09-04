@@ -43,7 +43,6 @@
           "to": "sunset-30m",
           "mode": "on_and_off",
           "limit": 80,
-          "adjust_by_lux": true,
           "levels": {
             "772478931": "on",
             "1256902388": "on",

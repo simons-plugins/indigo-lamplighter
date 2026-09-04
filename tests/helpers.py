@@ -93,3 +93,48 @@ def make_snapshot(dev_id, **kwargs):
     else:
         del indigo.devices[dev_id]
     return snapshot
+
+
+def make_period(name, start, end, mode="on_and_off", levels=None, **extra):
+    """One period as the config file writes it -- for make_zone() below."""
+    return {
+        "name": name,
+        "from": start,
+        "to": end,
+        "mode": mode,
+        "levels": levels if levels is not None else {"201": 60},
+        **extra,
+    }
+
+
+def make_zone(periods, sun=None, today=None, logger=None, clock=None, **zone_fields):
+    """A live `zone.Zone` built through `load_config`, not by hand.
+
+    Going through the loader is the point: a Zone assembled from
+    hand-written dataclasses can be given a shape the config file could never
+    produce, and then the test proves something about a zone that cannot
+    exist. `zone_fields` overrides any zone key -- lights, lux, hold_seconds,
+    override, enabled -- and `periods` is a list of make_period() dicts.
+    """
+    import datetime as _dt
+
+    from lamplighter.config import load_config
+    from lamplighter.zone import Zone
+
+    sun = sun or FixedSun()
+    document = {
+        "version": 1,
+        "zones": [
+            {
+                "name": "Study",
+                "presence_devices": [101],
+                "hold_seconds": 300,
+                "lux": None,
+                "lights": [201],
+                "periods": periods,
+                **zone_fields,
+            }
+        ],
+    }
+    config = load_config(document, sun, today or _dt.date(2026, 9, 4)).zones[0]
+    return Zone(config, sun, clock=clock, logger=logger)

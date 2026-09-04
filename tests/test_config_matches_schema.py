@@ -15,7 +15,10 @@ Only one direction is asserted for documents -- everything the schema rejects,
 the loader rejects too. The loader is allowed to be stricter, because it also
 enforces the three cross-field rules the schema cannot express (unique zone
 names, levels keys being members of the zone's lights, and periods that do
-not overlap).
+not overlap), and one v1 limitation: `adjust_by_lux` is described by the
+schema and refused by the loader. Every place the loader is stricter is
+listed at the bottom of this file, so the list is a decision anyone can read
+rather than a difference someone discovers.
 """
 
 import copy
@@ -122,3 +125,46 @@ def test_a_time_expression_the_schema_rejects_the_parser_rejects(expr):
     assert not _TIME_VALIDATOR.is_valid(expr), "fixture error: the schema accepts this"
     with pytest.raises(ValueError):
         parse_time_expr(expr)
+
+
+# ---------------------------------------------- where the loader is stricter
+#
+# The schema describes the file FORMAT; the loader describes what THIS
+# release can honour. Where they differ the difference is written down here
+# rather than left to be discovered by a config author whose schema-valid
+# file will not load.
+
+
+def test_adjust_by_lux_is_the_documented_place_the_loader_is_stricter():
+    """The schema accepts `adjust_by_lux: true`; v1's loader refuses it on a
+    zone that has a lux block (PRD section 5.6).
+
+    This is a documented v1 limitation, not drift: the flag is unimplemented,
+    and the alternative to refusing the file is a zone that runs every light
+    at its unscaled level with nothing to say the setting was ignored. When
+    it is implemented, this test is what says which side has to change.
+
+    Kills: quietly widening the loader to match the schema (the flag then
+    does nothing, silently), and: narrowing the schema instead, which would
+    make every file written for a later version invalid today.
+    """
+    document = copy.deepcopy(EXAMPLE)
+    kitchen = document["zones"][0]
+    assert kitchen["lux"] is not None, "fixture: the rule is scoped to a lux zone"
+    kitchen["periods"][1]["adjust_by_lux"] = True
+
+    assert jsonschema.Draft202012Validator(SCHEMA).is_valid(document), (
+        "the schema must keep describing the flag: it describes the format, "
+        "not this release"
+    )
+
+    with pytest.raises(ConfigError) as caught:
+        load_config(document, SUN, TODAY)
+    assert caught.value.path == "zones/0/periods/1/adjust_by_lux"
+    assert "not implemented in this version" in str(caught.value)
+
+
+def test_the_shipped_example_does_not_use_anything_the_loader_refuses():
+    """Belt and braces on the pair above: whatever the exclusion list grows
+    to, the file a config author copies must still load."""
+    load_config(copy.deepcopy(EXAMPLE), SUN, TODAY)

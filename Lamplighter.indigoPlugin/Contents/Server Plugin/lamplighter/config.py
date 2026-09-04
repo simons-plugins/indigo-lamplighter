@@ -302,6 +302,35 @@ def _levels(raw, path, lights):
     return levels
 
 
+def _adjust_by_lux(raw, path, has_lux):
+    """The lux-scaling flag, which this version refuses to pretend it honours.
+
+    ``adjust_by_lux`` is not implemented (PRD section 5.6). The schema still
+    describes it, because the schema describes the format rather than this
+    release, so this is the one place the loader is deliberately stricter than
+    the schema -- and it is stricter in the direction that fails loudly.
+
+    The rejection is scoped to a zone that HAS a lux block, because that is
+    the only configuration where honouring the flag would have changed a
+    level. On a zone with no sensor the flag could never have done anything
+    at all, so refusing the file over it would take out a working zone to
+    report a setting that was already inert; the engine warns once there
+    instead. Silently accepting it on a zone WITH a sensor is the failure
+    this exists to prevent: every light comes on at its unscaled level, and
+    nothing anywhere says the flag was ignored.
+    """
+    value = _bool(raw.get("adjust_by_lux", False), path)
+    if value and has_lux:
+        _fail(
+            path,
+            "adjust_by_lux is not implemented in this version. Remove it, or "
+            "set the levels you want directly: a zone with a lux block would "
+            "otherwise run at unscaled levels with nothing to say the flag "
+            "had been ignored.",
+        )
+    return value
+
+
 def _period_override(raw, path):
     _object(raw, path, required=_PERIOD_OVERRIDE_KEYS, allowed=_PERIOD_OVERRIDE_KEYS)
     return PeriodOverride(
@@ -310,7 +339,7 @@ def _period_override(raw, path):
     )
 
 
-def _period(raw, path, lights):
+def _period(raw, path, lights, has_lux):
     _object(raw, path, required=_PERIOD_REQUIRED, allowed=_PERIOD_KEYS)
     return Period(
         name=_string(raw["name"], f"{path}/name", max_length=64),
@@ -322,7 +351,7 @@ def _period(raw, path, lights):
             if "limit" not in raw
             else _int(raw["limit"], f"{path}/limit", minimum=1, maximum=100)
         ),
-        adjust_by_lux=_bool(raw.get("adjust_by_lux", False), f"{path}/adjust_by_lux"),
+        adjust_by_lux=_adjust_by_lux(raw, f"{path}/adjust_by_lux", has_lux),
         override=(
             None if "override" not in raw else _period_override(raw["override"], f"{path}/override")
         ),
@@ -391,7 +420,7 @@ def _zone(raw, path, sun, today):
     lights = _device_ids(raw["lights"], f"{path}/lights", min_items=1)
     override = _zone_override(raw.get("override", {}), f"{path}/override")
     periods = tuple(
-        _period(item, f"{path}/periods/{i}", lights)
+        _period(item, f"{path}/periods/{i}", lights, lux is not None)
         for i, item in enumerate(_array(raw["periods"], f"{path}/periods", min_items=1))
     )
     # The cross-field rule the schema cannot express: no two periods may

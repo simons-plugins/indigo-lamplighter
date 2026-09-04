@@ -133,8 +133,13 @@ machine reacts to their edges, not to the raw readings.
 ```
 
 - **OFF-DUTY**: no active period, or the room is bright, or the plugin/zone is
-  disabled. Desired = `leave` for every device, except periods in "off only"
-  mode, where desired = off for all when VACANT.
+  disabled. Desired depends on the cause (decided 2026-09-04, resolving a
+  contradiction with §5.6): **bright** → the same as VACANT (every device
+  with a level → off, `leave` → leave), because daylight makes the lights
+  unnecessary and the house relies on lights going off when a room brightens;
+  **no active period** or **disabled** → `leave` for every device, the plugin
+  has no opinion. Periods in "off only" mode never turn lights on in
+  OCCUPIED and turn them off in VACANT.
 - **VACANT**: desired = off for every device with a level in this period;
   `leave` devices untouched.
 - **OCCUPIED**: desired = the period's level per device.
@@ -176,7 +181,11 @@ devices without an explicit int), and `override` (`duration_minutes`,
 `extend_minutes`) replacing the zone's override timing while the period is
 active. `leave` means the plugin never writes the
 device in that period, in any state; `off` means it is turned off in VACANT
-and OFF-DUTY and to its level in OCCUPIED.
+(and in OFF-DUTY when the cause is bright) and held off in OCCUPIED.
+`adjust_by_lux` is **not implemented in v1**: the loader rejects
+`adjust_by_lux: true` on a zone that has a lux block, with a message saying
+so, rather than letting a runtime path raise. `hold_seconds: 0` means
+presence is never active (the zone behaves as off-only).
 
 ### 5.7 Override detection
 
@@ -191,7 +200,14 @@ The rule from the fork, unchanged, because it is proven:
    transition.
 
 Applied on every `deviceUpdated` for a zone light, on the callback thread,
-before anything else can run. Creating the override marks the zone dirty; the
+before anything else can run.
+
+`unlock_on_leave` is edge-shaped: the override is released when the zone's
+presence hold expires **after** the override began, i.e. the room was
+occupied when the person took over and has since emptied. A lock taken in an
+already-empty room (the `lock zone` action from an app) is not released by
+the next tick; it runs to its expiry. This closes fork #17 in both
+directions and survives persistence, since both timestamps are persisted. Creating the override marks the zone dirty; the
 worker records it, persists it, and logs the device and the before/after.
 
 ### 5.8 Reconcile

@@ -251,3 +251,81 @@ def test_the_validation_dates_reach_beyond_today_and_tomorrow():
     assert TODAY in dates and TODAY + dt.timedelta(days=1) in dates
     months = {date.month for date in dates}
     assert {3, 6, 9, 12} <= months
+
+
+# ------------------------------------------------- adjust_by_lux (v1 limit)
+
+
+def test_adjust_by_lux_is_refused_on_a_zone_that_has_a_lux_block():
+    """`adjust_by_lux: true` with a lux sensor is a load-time error naming the
+    path and saying it is not implemented (PRD section 5.6).
+
+    The schema still describes the flag -- it describes the file format, not
+    this release -- so this is the one rule where the loader is deliberately
+    stricter than the schema. It is stricter in the direction that fails
+    loudly: the alternative is a zone that lights every room at its unscaled
+    level with nothing anywhere saying the flag was ignored.
+
+    Kills: accept the flag and ignore it at runtime.
+    """
+    with pytest.raises(ConfigError) as caught:
+        load(
+            lux={"device": 301, "dark_below": 2200},
+            periods=[
+                {
+                    "name": "Evening",
+                    "from": "18:00",
+                    "to": "23:00",
+                    "mode": "on_and_off",
+                    "adjust_by_lux": True,
+                    "levels": {"201": 60},
+                }
+            ],
+        )
+
+    assert caught.value.path == "zones/0/periods/0/adjust_by_lux"
+    assert "adjust_by_lux is not implemented in this version" in str(caught.value)
+
+
+def test_adjust_by_lux_is_accepted_on_a_zone_with_no_lux_block():
+    """Scoped to where it would have mattered.
+
+    On a zone with no sensor the flag could never have changed a level, so
+    refusing the file over it would take out a working zone to report a
+    setting that was already inert. The engine warns once instead.
+
+    Kills: reject the flag everywhere, which turns a harmless leftover in a
+    hallway's config into a plugin that will not load.
+    """
+    zone = load(
+        lux=None,
+        periods=[
+            {
+                "name": "Evening",
+                "from": "18:00",
+                "to": "23:00",
+                "mode": "on_and_off",
+                "adjust_by_lux": True,
+                "levels": {"201": 60},
+            }
+        ],
+    ).zones[0]
+    assert zone.periods[0].adjust_by_lux is True
+
+
+def test_adjust_by_lux_false_is_never_refused():
+    """The rejection is about the flag being ON, not about it being present."""
+    zone = load(
+        lux={"device": 301, "dark_below": 2200},
+        periods=[
+            {
+                "name": "Evening",
+                "from": "18:00",
+                "to": "23:00",
+                "mode": "on_and_off",
+                "adjust_by_lux": False,
+                "levels": {"201": 60},
+            }
+        ],
+    ).zones[0]
+    assert zone.periods[0].adjust_by_lux is False

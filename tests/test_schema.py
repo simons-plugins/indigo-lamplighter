@@ -67,8 +67,13 @@ def test_example_exercises_the_shapes_the_prd_calls_out():
     assert "dark_below_variable_id" in kitchen["lux"], "variable-driven threshold"
     periods = {p["name"]: p for p in kitchen["periods"]}
     assert "override" in periods["Dusk"], "period-level override (decision 4)"
-    assert periods["Daytime"]["adjust_by_lux"] is True
     assert periods["Daytime"]["limit"] == 80
+    assert "adjust_by_lux" not in periods["Daytime"], (
+        "the schema still describes adjust_by_lux, but the loader refuses it on "
+        "a zone with a lux block (PRD section 5.6, not implemented in v1). The "
+        "example is what a config author copies, so it must not demonstrate a "
+        "setting that makes the file fail to load."
+    )
     assert "leave" in periods["Overnight"]["levels"].values(), "leave (R12)"
 
     assert hallway["lux"] is None, "a zone with no daylight gate"
