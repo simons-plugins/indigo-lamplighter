@@ -373,8 +373,10 @@ handler follows the configured level from startup.
 
 ## 11. Open questions for Simon
 
-1. Global enable: a `lamplighter_controller` device (controllable from Domio
-   and triggers) or a plugin preference? PRD assumes the device.
+1. **Decided 2026-09-04: controller device.** Global enable is a
+   `lamplighter_controller` device (controllable from Domio, control pages,
+   triggers and action groups), with the per-zone devices carrying their own
+   enable underneath it.
 2. `lock zone` action in v1? PRD says yes; it costs nothing and scripts asked
    for it.
 3. Unreadable lux sensor: treat as dark (lights on, safe for people) or as
