@@ -39,6 +39,7 @@ must never be made from live device state.
 Inherits workspace standards from [root CLAUDE.md](../CLAUDE.md#common-standards-apply-to-every-project-unless-its-claudemd-overrides). Key points:
 
 - **Version bump per PR**: `Info.plist` `PluginVersion` (`YYYY.R.P`); `CFBundleVersion` stays `1.0.0`.
+  **Pre-release rule (Simon, 2026-09-05): the whole build up to the first release is `2026.1.x` — PATCH bumps only, never a minor bump, so the first shipped version is not `2026.17`.** The first release becomes `2026.1.0`'s successor line as decided at release time.
 - **Testing**: pytest with a fake `indigo` in `tests/conftest.py`; one test per promise, each named for the mutation it kills, verified by applying the mutation; degradation paths must say so, never return a quiet empty result.
 - **Merge**: GitHub PR only, never `--admin`, never squash, wait for CI green, wait for Simon's go-ahead.
 - **Before writing Indigo plugin code**: invoke `/indigo:dev`.
