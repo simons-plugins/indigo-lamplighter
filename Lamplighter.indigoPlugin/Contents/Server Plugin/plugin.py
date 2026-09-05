@@ -204,8 +204,36 @@ class Plugin(indigo.PluginBase):
         #: transient lookup failure into a permanently lost override, so the
         #: next successful pass restores before it publishes.
         self._unrestored = set()
+        #: When the RUNNING configuration was last loaded successfully, as a
+        #: local ISO-8601 string, and how many zones it declared. "" means
+        #: nothing has loaded since this plugin started. Together they are the
+        #: reload signal the MCP tools poll: every other controller state also
+        #: moves on an ordinary worker pass, so none of them can answer "has
+        #: the file been reloaded since I wrote it".
+        self._config_loaded_at = ""
+        self._config_zone_count = 0
 
     # ------------------------------------------------------------- lifecycle
+
+    def _record_config_loaded(self, config, now):
+        """Note that THIS configuration is now the running one, and say so.
+
+        Called only where a load has actually succeeded and been applied, so
+        a rejected edit leaves both values exactly where they were -- which
+        is the whole signal: a caller that wrote a file and sees an unmoved
+        ``config_loaded_at`` knows the file was refused, and ``config_status``
+        says why.
+
+        The publish is *in here* rather than left to the caller so that the
+        record and the announcement cannot come apart: a timestamp that only
+        reaches the device on the next worker pass is one a poller cannot
+        distinguish from a pass that did nothing. At first start the
+        controller device does not exist yet and this is a no-op; the
+        ``_sync_all()`` at the end of ``startup`` publishes it.
+        """
+        self._config_loaded_at = now.strftime("%Y-%m-%dT%H:%M:%S")
+        self._config_zone_count = len(config.zones)
+        self._sync_controller()
 
     def startup(self):
         # No super().startup() -- the base class does not define one.
@@ -220,6 +248,10 @@ class Plugin(indigo.PluginBase):
         self._config_checked_at = dt.datetime.now()
 
         config, complaint = self._read_config()
+        # A startup that could not read the file has NOT loaded a
+        # configuration, so it must not stamp one: "" is the honest answer
+        # and it is what tells a caller the plugin is running on nothing.
+        loaded = config is not None
         if config is None:
             self.logger.error(
                 f"Lamplighter: {complaint}. No zones are running; fix the file and it "
@@ -239,6 +271,8 @@ class Plugin(indigo.PluginBase):
             logger=self.logger,
             on_zone_changed=self._zone_changed,
         )
+        if loaded:
+            self._record_config_loaded(config, dt.datetime.now())
 
         self._refresh_device_map()
         self._create_missing_devices()
@@ -777,6 +811,7 @@ class Plugin(indigo.PluginBase):
             self.logger.info(f"Lamplighter: {complaint} ({self.config_file}).")
 
         self.engine.reload(config, now)
+        self._record_config_loaded(config, now)
         # Before anything is published or reconciled. A zone the edit has just
         # switched on has never looked at its room, and an unseeded zone reads
         # as an empty one.
@@ -934,7 +969,12 @@ class Plugin(indigo.PluginBase):
         if dev is None:
             return
         dev.updateStatesOnServer(
-            indigo_sync.controller_states(self.engine, self._config_status)
+            indigo_sync.controller_states(
+                self.engine,
+                self._config_status,
+                config_loaded_at=self._config_loaded_at,
+                config_zone_count=self._config_zone_count,
+            )
         )
         if bool(dev.onState) != bool(self.engine.plugin_enabled):
             dev.updateStateOnServer("onOffState", bool(self.engine.plugin_enabled))

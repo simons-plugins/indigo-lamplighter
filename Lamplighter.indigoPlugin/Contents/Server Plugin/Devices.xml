@@ -198,6 +198,28 @@
                 <TriggerLabel>Configuration Status</TriggerLabel>
                 <ControlPageLabel>Configuration Status</ControlPageLabel>
             </State>
+
+            <!-- The load record: WHEN the running configuration was last
+                 loaded, and how many zones it had. A reload-specific signal,
+                 which is the point: every other state here also moves on an
+                 ordinary pass, so a caller watching for "the file was
+                 reloaded" cannot tell one from the other. These two move only
+                 on a successful load, and they move together.
+
+                 config_loaded_at is a String, and "" means "no configuration
+                 has loaded successfully since this plugin started". A
+                 rejected edit leaves it exactly where it was, which is how a
+                 caller sees that the file it just wrote was refused. -->
+            <State id="config_loaded_at">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Configuration Loaded At</TriggerLabel>
+                <ControlPageLabel>Configuration Loaded At</ControlPageLabel>
+            </State>
+            <State id="config_zone_count">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Configured Zone Count</TriggerLabel>
+                <ControlPageLabel>Configured Zone Count</ControlPageLabel>
+            </State>
         </States>
     </Device>
 </Devices>

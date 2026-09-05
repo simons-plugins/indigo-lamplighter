@@ -21,7 +21,13 @@ import xml.etree.ElementTree as ET
 
 import indigo
 import pytest
-from helpers import make_device, make_period, make_snapshot, make_zone_document
+from helpers import (
+    make_config,
+    make_device,
+    make_period,
+    make_snapshot,
+    make_zone_document,
+)
 
 import plugin as plugin_module
 from lamplighter import compare, indigo_sync
@@ -1255,3 +1261,170 @@ def test_every_action_return_goes_through_the_bridge_guard(install):
     ]
 
     assert returns == [], f"these returns bypass _bridge_safe: {returns}"
+
+
+# ---------------------------------------------------------- the load record
+#
+# `config_loaded_at` and `config_zone_count` exist because every other
+# controller state moves on an ordinary worker pass: zone counters tick, the
+# explain line is rewritten, `config_status` sits at "ok" whether or not
+# anything was read. A caller that has just written lamplighter.json and wants
+# to know whether the plugin took it has nothing to watch. These two move on a
+# successful load and at no other time, which is what makes them an answer.
+
+RELOADED_AT = dt.datetime(2026, 9, 5, 4, 5, 6)
+
+
+def force_a_recheck(the_plugin):
+    """Make the next _check_config_file actually stat and read the file.
+
+    Both guards have to go: the interval, and the remembered mtime (a rewrite
+    inside the filesystem's timestamp granularity looks unchanged).
+    """
+    the_plugin._config_checked_at = None
+    the_plugin._config_mtime = None
+
+
+def test_startup_stamps_when_the_configuration_loaded_and_how_many_zones(install):
+    """Kills: declaring the states and never publishing them, which shows as
+    a controller device with two fields that are empty for ever."""
+    the_plugin = started(a_document(hallway("Hallway"), hallway("Study", presence_devices=[102])))
+
+    states = controller_device().states
+    assert states["config_zone_count"] == 2
+    # A real, parseable local timestamp -- not "", and not a made-up one.
+    stamped = dt.datetime.fromisoformat(states["config_loaded_at"])
+    assert abs((dt.datetime.now() - stamped).total_seconds()) < 60
+    assert the_plugin._config_status == "ok"
+
+
+def test_a_successful_reload_advances_the_stamp_and_the_count(install):
+    """The signal itself.
+
+    Kills: recording the load once at startup and never again, which leaves a
+    caller polling a timestamp that can never move and inferring the reload
+    from the explain line -- which also changes on an ordinary pass.
+    """
+    the_plugin = started(a_document())
+    first = controller_device().states["config_loaded_at"]
+    assert controller_device().states["config_zone_count"] == 1
+
+    write_config(a_document(hallway("Hallway"), hallway("Study", presence_devices=[102])))
+    force_a_recheck(the_plugin)
+    assert the_plugin._check_config_file(RELOADED_AT) is True
+
+    states = controller_device().states
+    assert states["config_loaded_at"] == "2026-09-05T04:05:06"
+    assert states["config_loaded_at"] != first
+    assert states["config_zone_count"] == 2
+
+
+def test_a_rejected_edit_leaves_the_load_record_exactly_where_it_was(install, caplog):
+    """The half that makes the signal trustworthy.
+
+    A caller writes a file and polls. If the stamp moved, the plugin took it.
+    If it did not, `config_status` says why. Kills: stamping on every check
+    rather than on every successful load, which reports a refused file as
+    loaded and is worse than having no signal at all.
+    """
+    the_plugin = started(a_document())
+    before = controller_device().states
+    was = (before["config_loaded_at"], before["config_zone_count"])
+    assert was[0] != ""
+
+    write_text_config('{"version": 1, "zones": [}')
+    force_a_recheck(the_plugin)
+    with caplog.at_level(logging.ERROR):
+        assert the_plugin._check_config_file(RELOADED_AT) is False
+    # The next worker pass publishes the controller; the record must survive it.
+    the_plugin._sync_controller()
+
+    states = controller_device().states
+    assert (states["config_loaded_at"], states["config_zone_count"]) == was
+    assert "not valid JSON" in states["config_status"]
+
+
+def test_a_startup_that_could_not_read_the_file_stamps_nothing(install, caplog):
+    """"" means "nothing has loaded", and it has to stay true.
+
+    Kills: stamping unconditionally in startup, which tells a caller the
+    plugin is running a configuration it never managed to read.
+    """
+    write_text_config("{ not json at all")
+    make_device(101, "relay", name="Hallway Motion")
+    the_plugin = make_plugin()
+    with caplog.at_level(logging.ERROR):
+        the_plugin.startup()
+
+    states = controller_device().states
+    assert states["config_loaded_at"] == ""
+    assert states["config_zone_count"] == 0
+    assert "not valid JSON" in states["config_status"]
+
+
+def test_the_starter_file_counts_as_a_load_of_no_zones(install):
+    """A fresh install HAS loaded a configuration; it just has no zones in it.
+
+    Kills: treating the empty starter shape as a failure to load, which would
+    leave a brand new install looking permanently broken to a caller.
+    """
+    started()
+
+    states = controller_device().states
+    assert states["config_loaded_at"] != ""
+    assert states["config_zone_count"] == 0
+    assert states["config_status"] == "no zones are configured yet"
+
+
+def test_the_load_record_counts_the_configuration_it_was_handed(install):
+    """The count is a fact about the load, not a reading of the engine.
+
+    The two agree at both call sites today, because the engine is rebuilt
+    from the configuration before the record is taken -- so this is the only
+    thing that says which one is meant. It matters if the record is ever
+    taken earlier: `len(config.zones)` stays right, `len(engine.zones)` goes
+    quietly stale and reports the count of the configuration being replaced.
+
+    Kills: `len(self.engine.zones)` in place of `len(config.zones)`.
+    """
+    the_plugin = started(a_document())  # one zone live in the engine
+    two_zones = make_config([hallway("Hallway"), hallway("Study", presence_devices=[102])])
+
+    the_plugin._record_config_loaded(two_zones, RELOADED_AT)
+
+    assert len(the_plugin.engine.zones) == 1
+    assert controller_device().states["config_zone_count"] == 2
+
+
+class ZoneWorkStarted(Exception):
+    """Raised by a zone step that must not have been reached yet."""
+
+
+def test_the_load_record_is_published_before_any_zone_work(install, monkeypatch):
+    """Ordering, made fatal rather than inferred.
+
+    The record has to be on the device the moment the load succeeds, not at
+    the end of the reload -- a signal that arrives after a pass of zone work
+    is one a poller cannot tell from a pass that did nothing. Ordering is not
+    visible in the final state (the `_sync_all()` at the end of a reload
+    publishes it either way), so the only way to pin it is to make the next
+    step fatal and require the stamp to be there already.
+
+    Kills: dropping the publish from `_record_config_loaded`, and moving the
+    record below the seeding.
+    """
+    the_plugin = started(a_document())
+    write_config(a_document(hallway("Hallway"), hallway("Study", presence_devices=[102])))
+    force_a_recheck(the_plugin)
+
+    def fatal(*args, **kwargs):
+        raise ZoneWorkStarted("seeding ran before the load record was published")
+
+    monkeypatch.setattr(the_plugin.engine, "seed_inputs", fatal)
+
+    with pytest.raises(ZoneWorkStarted):
+        the_plugin._check_config_file(RELOADED_AT)
+
+    states = controller_device().states
+    assert states["config_loaded_at"] == "2026-09-05T04:05:06"
+    assert states["config_zone_count"] == 2

@@ -95,6 +95,8 @@ CONTROLLER_STATE_KEYS = (
     "writes_today",
     "overrides_today",
     "config_status",
+    "config_loaded_at",
+    "config_zone_count",
 )
 
 #: Persisted fields that are numbers. Everything else is a timestamp string
@@ -163,13 +165,26 @@ def _zone_state(key, value) -> dict:
     return {"key": key, "value": text, "uiValue": text or "none"}
 
 
-def controller_states(engine, config_status="ok") -> list:
+def controller_states(
+    engine, config_status="ok", config_loaded_at="", config_zone_count=0
+) -> list:
     """The controller device's states: the zones counted, the counters summed.
 
     ``config_status`` is here rather than derived because the engine has no
     idea a file exists. It is the one place a person can see that the plugin
     is running yesterday's configuration because today's does not parse --
     the ERROR in the log scrolls away, this does not.
+
+    ``config_loaded_at`` and ``config_zone_count`` are passed in for the same
+    reason and one more: they describe **the last successful load**, not the
+    engine as it stands. Deriving the count from ``engine.zones`` would make
+    it a live number that happens to agree, and the pair has to be a record
+    of one event -- "the configuration I am running was loaded at T and had N
+    zones" -- so that a caller reading both gets one consistent answer.
+
+    They exist because every other state here moves on an ordinary worker
+    pass, so a caller watching for "the file was reloaded" has nothing to
+    watch. These two move only when a load succeeds.
     """
     zones = list(engine.zones.values())
     counts = {
@@ -185,6 +200,18 @@ def controller_states(engine, config_status="ok") -> list:
     ]
     status = str(config_status or "ok")
     states.append({"key": "config_status", "value": status, "uiValue": status})
+    # "" rather than a made-up timestamp: nothing has loaded yet is a real
+    # answer, and a plausible-looking time would be the quiet lie R15 forbids.
+    loaded_at = str(config_loaded_at or "")
+    states.append(
+        {
+            "key": "config_loaded_at",
+            "value": loaded_at,
+            "uiValue": loaded_at or "never",
+        }
+    )
+    count = int(config_zone_count or 0)
+    states.append({"key": "config_zone_count", "value": count, "uiValue": str(count)})
     return states
 
 

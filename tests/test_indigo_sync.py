@@ -150,6 +150,42 @@ def test_devices_xml_declares_exactly_the_controller_states():
     published = keys_of(indigo_sync.controller_states(engine))
     assert tuple(xml_state_ids("lamplighter_controller")) == indigo_sync.CONTROLLER_STATE_KEYS
     assert published == list(indigo_sync.CONTROLLER_STATE_KEYS)
+    # Named as well as counted: the tuple comparison above passes just as
+    # happily if BOTH sides lose a state, and the load record is the one an
+    # MCP caller polls, so its absence would be silent at both ends.
+    assert "config_loaded_at" in published
+    assert "config_zone_count" in published
+
+
+def test_the_load_record_says_never_rather_than_inventing_a_time():
+    """Kills: defaulting config_loaded_at to now, which would tell a caller
+    the configuration had just loaded every time the plugin failed to load
+    one -- the exact question these two states exist to answer."""
+    zone = an_occupied_zone()
+    states = as_device_states(indigo_sync.controller_states(_FakeEngine({zone.name: zone})))
+
+    assert states["config_loaded_at"] == ""
+    assert states["config_zone_count"] == 0
+
+
+def test_the_load_record_is_reported_as_it_was_recorded():
+    """The count comes from the load, not from the engine.
+
+    Kills: deriving config_zone_count from len(engine.zones). They agree
+    today, and would stop agreeing the moment a load is rejected -- which is
+    the one time a caller is actually reading them.
+    """
+    zone = an_occupied_zone()
+    engine = _FakeEngine({zone.name: zone})  # one zone live
+    states = as_device_states(
+        indigo_sync.controller_states(
+            engine, "ok", config_loaded_at="2026-09-05T04:05:06", config_zone_count=6
+        )
+    )
+
+    assert states["config_loaded_at"] == "2026-09-05T04:05:06"
+    assert states["config_zone_count"] == 6
+    assert states["zones"] == 1
 
 
 def test_the_manual_lock_device_id_is_the_one_the_engine_records():
