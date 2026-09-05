@@ -160,6 +160,11 @@ class Plugin(indigo.PluginBase):
         self._create_missing_devices()
         self._restore_persisted()
         self._apply_controller_enable()
+        # After restore, never before: the persisted record is what the zone
+        # knew when it stopped, and seeding is what the room is doing now. A
+        # presence device that is on right now refreshes the restored
+        # timestamp; one that is off leaves it alone.
+        self.engine.seed_inputs(dt.datetime.now())
 
         indigo.devices.subscribeToChanges()
         indigo.variables.subscribeToChanges()
@@ -519,6 +524,10 @@ class Plugin(indigo.PluginBase):
             self.logger.info(f"Lamplighter: {complaint} ({self.config_file}).")
 
         self.engine.reload(config, now)
+        # Before anything is published or reconciled. A zone the edit has just
+        # switched on has never looked at its room, and an unseeded zone reads
+        # as an empty one.
+        self.engine.seed_inputs(now)
         self._refresh_device_map()
         self._create_missing_devices()
         self._sync_all()

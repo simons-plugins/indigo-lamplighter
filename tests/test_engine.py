@@ -576,3 +576,198 @@ def test_the_actions_move_the_zone_without_a_device_event():
     assert engine.set_plugin_enabled(True) is True
     engine.tick(clock.at(seconds=40))
     assert zone.state is ZoneState.OCCUPIED
+
+
+# ---------------------------------------------------------------- the seeding
+#
+# The first run on jarvis: the Hallway zone was switched on by a configuration
+# reload while its Occupatum presence device was reporting and the lamp was at
+# 100. Lamplighter logged `off_duty -> vacant (configuration reloaded)` with
+# `presence_active=False, presence_last_seen=None, lux=None` and then turned
+# the lamp off on the person standing under it.
+#
+# One cause, two gaps: a zone only ever learned presence and lux from later
+# device *edges*, so at the moment it was built, reloaded or enabled it had no
+# evidence at all -- and no evidence is indistinguishable from an empty, bright
+# room. These pin the fix: a zone reads its own input devices before it is
+# allowed to decide anything.
+
+
+def test_a_zone_enabled_while_the_room_is_occupied_does_not_turn_the_lights_off():
+    """The jarvis defect, in one test.
+
+    Kills: leaving a freshly built or reloaded zone to wait for an edge. With
+    seeding skipped the zone evaluates VACANT from `last_seen=None` and the
+    reconcile pass commands the lamp off -- on an occupied room, four seconds
+    after a configuration reload.
+    """
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, _changed = build(commander, enabled=False)
+    make_device(101, "relay", name="Hallway Motion", onState=True)
+    make_device(201, "dimmer", brightness=60)
+    make_device(202, "dimmer", brightness=30)
+    make_device(302, "sensor", sensorValue=1200)
+
+    assert engine.set_zone_enabled("Kitchen", True) is True
+    engine.tick(clock.now)
+
+    assert zone.state is ZoneState.OCCUPIED
+    assert zone.presence.last_seen == clock.now, "an occupied room at startup is occupied NOW"
+    assert commander.commands == [], "the lights are already at their levels"
+
+
+def test_a_zone_reads_its_lux_sensor_before_its_first_decision():
+    """Kills: leaving the verdict at its default until the sensor speaks.
+
+    A sensor that reports every few minutes leaves a zone deciding from a
+    verdict nobody took for as long as it stays quiet, and the default is the
+    one that takes an indoor zone off duty in a dark room.
+    """
+    engine, zone, clock, _changed = build()
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    assert zone.lux.value is None
+    engine.tick(clock.now)
+
+    assert zone.lux.value == 1200
+    assert zone.lux.verdict is True, "1200 is below the 2200 threshold"
+
+
+def test_a_presence_device_reporting_off_at_seeding_changes_nothing():
+    """Presence ends by the hold expiring, never by a sensor being quiet.
+
+    Kills: ingesting the reading whatever it says, which stamps `last_seen`
+    on every reload and makes an empty room look occupied for a whole hold.
+    """
+    engine, zone, clock, _changed = build()
+    make_device(101, "relay", onState=False)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.seed_inputs(clock.now)
+
+    assert zone.presence.last_seen is None
+
+
+def test_a_lookup_that_failed_at_seeding_is_retried_and_decides_nothing_meanwhile(monkeypatch):
+    """A busy server must not cost a zone its evidence, or its future.
+
+    Kills two opposite mistakes. Giving up after the first failure leaves the
+    zone permanently unseeded, so it decides from nothing for ever; evaluating
+    it anyway while unseeded decides VACANT from a gap and turns the lights
+    off. Neither shows up as an error: both look like a quiet zone.
+    """
+    from lamplighter import devices as devices_module
+
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, _changed = build(commander)
+    make_device(101, "relay", name="Kitchen Motion", onState=True)
+    make_device(201, "dimmer", brightness=60)
+    make_device(202, "dimmer", brightness=30)
+    make_device(302, "sensor", sensorValue=1200)
+
+    real = devices_module.get_device
+    unanswered = {"still": True}
+
+    def flaky(dev_id):
+        if unanswered["still"] and dev_id == 101:
+            raise devices_module.LookupFailed(dev_id, RuntimeError("the server is busy"))
+        return real(dev_id)
+
+    monkeypatch.setattr(devices_module, "get_device", flaky)
+
+    # The live path: a reload marks every zone dirty, so this zone WOULD be
+    # evaluated on this pass if the unseeded guard were not there.
+    engine.mark_all_dirty("configuration reloaded")
+    engine.tick(clock.now)
+    assert engine.unseeded == ("Kitchen",)
+    assert zone.state is not ZoneState.VACANT, "an unseeded zone must not decide it is empty"
+    assert commander.commands == [], "and it must not write on the strength of that"
+    assert "Kitchen" in engine.dirty, "the cause is kept for the pass that can read the devices"
+
+    unanswered["still"] = False
+    engine.tick(clock.at(seconds=1))
+
+    assert engine.unseeded == ()
+    assert zone.state is ZoneState.OCCUPIED
+    assert commander.commands == []
+
+
+def test_a_presence_device_that_is_gone_is_warned_about_once_and_not_retried_for_ever():
+    """Gone is a configuration problem; asking again will never fix it.
+
+    Kills: treating DeviceGone as a retryable failure, which leaves the zone
+    unseeded for ever and therefore never evaluated at all -- the whole zone
+    silently stops, from one id left behind in the configuration.
+    """
+    engine, zone, clock, _changed = build()
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.seed_inputs(clock.now)
+
+    assert engine.unseeded == ()
+
+
+def test_a_live_presence_reading_refreshes_an_older_persisted_timestamp():
+    """Restore first, then seed: the record is what the zone knew, the device
+    is what the room is doing.
+
+    Kills: seeding before restore, which lets a stale persisted timestamp
+    overwrite the fact that somebody is in the room right now.
+    """
+    from lamplighter import persist
+
+    engine, zone, clock, _changed = build()
+    make_device(101, "relay", onState=True)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.restore(
+        {"Kitchen": {"version": persist.VERSION, "presence_last_seen": "2026-09-04T18:00:00"}},
+        clock.now,
+    )
+    assert zone.presence.last_seen == dt.datetime(2026, 9, 4, 18, 0, 0)
+
+    engine.seed_inputs(clock.now)
+
+    assert zone.presence.last_seen == clock.now
+
+
+def test_a_reload_re_seeds_every_zone():
+    """R13 restores what the zone knew; only the devices know the room.
+
+    Kills: carrying the old zone's inputs across a reload and calling it
+    seeded. The rebuilt zone's `enabled` comes from the file, so a reload is
+    exactly when a zone can go from off to on with no idea what the room is
+    doing.
+    """
+    engine, zone, clock, _changed = build(enabled=False)
+    make_device(101, "relay", onState=True)
+    make_device(201, "dimmer", brightness=60)
+    make_device(202, "dimmer", brightness=30)
+    make_device(302, "sensor", sensorValue=1200)
+    engine.tick(clock.now)
+
+    sun = FixedSun()
+    reloaded = make_config(
+        [
+            make_zone_document(
+                name="Kitchen",
+                lights=[201, 202],
+                presence_devices=[101],
+                hold_seconds=300,
+                lux={"device": 302, "dark_below": 2200, "hysteresis": 300},
+                enabled=True,
+                periods=[make_period("Evening", "18:00", "23:00", levels={"201": 60, "202": 30})],
+            )
+        ],
+        sun=sun,
+    )
+    engine.reload(reloaded, clock.at(seconds=10))
+    assert engine.unseeded == ("Kitchen",)
+
+    engine.tick(clock.now)
+
+    assert engine.zones["Kitchen"].state is ZoneState.OCCUPIED
+    assert engine.zones["Kitchen"].presence.last_seen == clock.now

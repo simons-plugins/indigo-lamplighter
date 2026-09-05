@@ -282,6 +282,109 @@ def test_a_lookup_that_broke_at_startup_does_not_lose_the_override(install, monk
     assert dev.states["persist_override_device"] == "201"
 
 
+def test_startup_in_an_occupied_room_does_not_turn_the_light_off(install):
+    """The jarvis defect, through the bundle.
+
+    Kills: starting up and waiting for a device edge. The room is occupied and
+    the lamp is on; a zone that has not read its presence device evaluates
+    VACANT and the first reconcile pass turns the lamp off on the person
+    standing under it.
+    """
+    write_config(a_document())
+    make_device(101, "relay", name="Hallway Motion", onState=True)
+    make_device(201, "relay", name="Hallway Light", onState=True)
+
+    the_plugin = make_plugin()
+    the_plugin.startup()
+    the_plugin.engine.tick(NOW)
+
+    assert the_plugin.engine.zones["Hallway"].state.value == "occupied"
+    assert indigo.devices[201].onState is True, "the lamp was on and nobody left the room"
+
+
+def test_a_reload_that_enables_a_zone_in_an_occupied_room_leaves_the_light_on(install):
+    """Exactly what happened on jarvis: the zone arrived enabled by an edit.
+
+    Kills: re-seeding only at startup. `enabled` deliberately comes from the
+    file on every reload, so a reload is precisely when a zone can go from off
+    to on knowing nothing at all about the room it has just taken over.
+    """
+    write_config(a_document(hallway(enabled=False)))
+    make_device(101, "relay", name="Hallway Motion", onState=True)
+    make_device(201, "relay", name="Hallway Light", onState=True)
+    the_plugin = make_plugin()
+    the_plugin.startup()
+    the_plugin.engine.tick(NOW)
+
+    write_config(a_document(hallway(enabled=True)))
+    the_plugin._config_checked_at = None
+    assert the_plugin._check_config_file(NOW) is True
+    the_plugin.engine.tick(NOW)
+
+    assert the_plugin.engine.zones["Hallway"].state.value == "occupied"
+    assert indigo.devices[201].onState is True
+
+
+def test_a_zone_device_switched_back_on_re_reads_the_room(install):
+    """The same gap, reached through the device rather than the file.
+
+    Kills: seeding on reload only. A zone that has been off for an hour knows
+    nothing about what happened while it was off, and the first thing it does
+    on being switched back on is decide.
+    """
+    write_config(a_document())
+    make_device(101, "relay", name="Hallway Motion", onState=False)
+    make_device(201, "relay", name="Hallway Light", onState=True)
+    the_plugin = make_plugin()
+    the_plugin.startup()
+    dev = device_for("Hallway")
+    the_plugin.actionControlDevice(a_device_action(indigo.kDeviceAction.TurnOff), dev)
+    the_plugin.engine.tick(NOW)
+
+    # Somebody walks in while the zone is switched off; no edge reaches a
+    # disabled zone that would survive to the moment it is switched back on.
+    indigo.devices[101].updateStateOnServer("onOffState", True)
+
+    the_plugin.actionControlDevice(a_device_action(indigo.kDeviceAction.TurnOn), dev)
+    the_plugin.engine.tick(NOW)
+
+    assert the_plugin.engine.zones["Hallway"].state.value == "occupied"
+    assert indigo.devices[201].onState is True
+
+
+def test_a_live_presence_reading_beats_the_persisted_timestamp_at_startup(install):
+    """Restore first, seed second, and the order is the whole point.
+
+    Kills: seeding before restoring, which lets a persisted timestamp from
+    before the restart overwrite the fact that the sensor is reporting right
+    now -- and an hour-old `last_seen` is an expired hold, so the zone's first
+    act is to turn the lights off on an occupied room.
+    """
+    write_config(a_document())
+    make_device(101, "relay", name="Hallway Motion", onState=True)
+    make_device(201, "relay", name="Hallway Light", onState=True)
+    dev = indigo.device.create(
+        protocol=indigo.kProtocol.Plugin,
+        name="Lamplighter - Hallway",
+        deviceTypeId=plugin_module.ZONE_TYPE_ID,
+        props={"zone_name": "Hallway"},
+    )
+    stale = "2020-01-01T00:00:00"
+    dev.updateStatesOnServer(
+        [
+            {"key": "persist_version", "value": "1"},
+            {"key": "persist_presence_last_seen", "value": stale},
+        ]
+    )
+
+    the_plugin = make_plugin()
+    the_plugin.startup()
+
+    last_seen = the_plugin.engine.zones["Hallway"].presence.last_seen
+    assert last_seen > dt.datetime(2020, 1, 2), f"the stale record won: {last_seen}"
+    assert (dt.datetime.now() - last_seen).total_seconds() < 60
+
+
 def test_a_controller_left_off_keeps_every_zone_off(install, caplog):
     """The global enable lives on the device, because nothing else carries it.
 

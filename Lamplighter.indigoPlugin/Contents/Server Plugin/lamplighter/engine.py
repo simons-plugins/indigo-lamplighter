@@ -37,7 +37,7 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 
-from . import persist
+from . import devices, persist
 from .lux import read_sensor_value
 from .override import EchoBook, is_manual_override
 from .reconcile import Reconciler
@@ -150,6 +150,13 @@ class Engine:
         #: six zones do not need a heap.
         self._wakes: dict = {}
         self._next_reconcile = None
+        #: Zones that have never read the CURRENT state of their input
+        #: devices. A zone only learns presence and lux from later device
+        #: *edges*, so one that has just been built, reloaded or enabled
+        #: knows nothing about the room it is in -- and "nothing" reads
+        #: exactly like "empty and bright". Seeded before the first
+        #: evaluation, and retried until the devices answer.
+        self._unseeded: set = set(self.zones)
 
     def __repr__(self):
         return f"<Engine {len(self.zones)} zones>"
@@ -279,6 +286,12 @@ class Engine:
         if self._next_reconcile is None:
             self._next_reconcile = now + dt.timedelta(seconds=self.config.reconcile_seconds)
 
+        # Before anything is decided. A zone that has not read its inputs has
+        # no evidence at all, and no evidence looks identical to "empty and
+        # bright" -- which is how an occupied Hallway gets its lamp switched
+        # off four seconds after a configuration reload.
+        self.seed_inputs(now)
+
         transitions, commands, handled = [], [], []
 
         dirty, self._dirty = self._dirty, {}
@@ -286,10 +299,17 @@ class Engine:
             zone = self.zones.get(name)
             if zone is None:
                 continue  # the zone went away in a reload between mark and drain
+            if name in self._unseeded:
+                # Its devices did not answer this pass. Keeping the cause and
+                # waiting is the only honest option: evaluating now would
+                # decide from a gap in the evidence, and the decision it
+                # would reach is "vacant, turn the lights off".
+                self._dirty.setdefault(name, cause)
+                continue
             self._run_zone(zone, now, cause, transitions, commands, handled)
 
         for zone in self.zones.values():
-            if zone.name in handled:
+            if zone.name in handled or zone.name in self._unseeded:
                 continue
             due = self._wakes.get(zone.name)
             if due is not None and due <= now:
@@ -303,7 +323,7 @@ class Engine:
             # and the retry machinery the fork needed.
             self._next_reconcile = now + dt.timedelta(seconds=self.config.reconcile_seconds)
             for zone in self.zones.values():
-                if zone.name in handled or not zone.running:
+                if zone.name in handled or zone.name in self._unseeded or not zone.running:
                     continue
                 sent = self.reconciler.run(zone, now)
                 handled.append(zone.name)
@@ -316,6 +336,80 @@ class Engine:
             commands=tuple(commands),
             evaluated=tuple(handled),
         )
+
+    # ---------------------------------------------------------------- seeding
+
+    def seed_inputs(self, now: dt.datetime) -> tuple:
+        """Read the current state of the input devices of unseeded zones.
+
+        A zone learns presence and lux from device *edges*, which is right for
+        a running plugin and wrong for one that has just started: at the
+        moment a zone is built, reloaded or switched on, nothing has happened
+        on the device bus yet, so the zone believes nobody has ever been in
+        the room and the lux sensor has never been read. Both of those read
+        as "go off duty and turn the lights off", and on the first run on
+        jarvis that is exactly what the Hallway did to an occupied room.
+
+        So the zone asks. Presence devices that are on now are ingested as
+        seen *now* -- an occupied room at startup is occupied now, and the
+        hold should run from now rather than from a timestamp nobody has -- 
+        and the lux sensor is read so the first verdict comes from a reading
+        instead of a default. A device reporting off changes nothing:
+        presence ends by the hold expiring, never by a sensor going quiet.
+
+        Returns the zones that still could not be read, which stay unseeded
+        and are retried on the next tick.
+        """
+        for name in sorted(self._unseeded):
+            zone = self.zones.get(name)
+            if zone is None:
+                self._unseeded.discard(name)
+                continue
+            if self._seed_zone(zone, now):
+                self._unseeded.discard(name)
+        return tuple(sorted(self._unseeded))
+
+    def _seed_zone(self, zone, now) -> bool:
+        """Read one zone's inputs. False means "ask again next tick".
+
+        The two lookup failures are not the same answer and do not share a
+        handler (R15). A device that is *gone* is a configuration problem: it
+        is warned about once and skipped for good, because asking again every
+        second will never make it exist. A lookup that *failed* taught us
+        nothing about the room, so the zone stays unseeded and is retried --
+        giving up on it would leave a zone permanently unseeded because the
+        server happened to be busy at startup, and an unseeded zone is one
+        that never evaluates.
+
+        The lux sensor deliberately does not block the retry: ``read_lux``
+        already turns both failures into the configured ``when_unreadable``
+        direction, and a zone whose lux sensor is broken must still run.
+        """
+        readable = True
+        for device_id in zone.config.presence_devices:
+            try:
+                device = devices.get_device(device_id)
+            except devices.DeviceGone:
+                devices.warn_gone_once(self.logger, device_id, zone.name)
+                continue
+            except devices.LookupFailed as exc:
+                devices.warn_lookup_failed_once(self.logger, device_id, zone.name, exc.cause)
+                readable = False
+                continue
+            devices.forget_warnings(device_id)
+            if presence_is_on(device):
+                zone.ingest_presence(device_id, True, now)
+
+        zone.read_lux(now)
+
+        if readable:
+            self.logger.debug(
+                f"{zone.name}: inputs seeded from the devices themselves -- presence "
+                f"{'active' if zone.presence.active(now, zone.config.hold_seconds) else 'inactive'}"
+                f" (last seen {zone.presence.last_seen or 'never'}), "
+                f"lux {zone.lux.value if zone.lux.value is not None else 'unread'}"
+            )
+        return readable
 
     def _run_zone(self, zone, now, cause, transitions, commands, handled):
         transition = zone.evaluate(now, cause)
@@ -349,8 +443,13 @@ class Engine:
         return "midnight"
 
     def next_wake(self, now: dt.datetime):
-        """When the worker should wake, or ``now`` if there is work waiting."""
-        if self._dirty:
+        """When the worker should wake, or ``now`` if there is work waiting.
+
+        A dirty zone that could not read its devices does *not* count as work
+        waiting: it will be retried, but retrying it as fast as the worker can
+        loop turns an unanswering server into a spin.
+        """
+        if any(name not in self._unseeded for name in self._dirty):
             return now
         candidates = [when for when in self._wakes.values() if when is not None]
         if self._next_reconcile is not None:
@@ -408,8 +507,12 @@ class Engine:
     def set_zone_enabled(self, zone_name, enabled) -> bool:
         """Enable or disable one zone. True if it changed."""
         zone = self.zones[zone_name]
+        was_running = zone.running
         if not zone.set_enabled(enabled=enabled):
             return False
+        if zone.running and not was_running:
+            # It has been off; the room has moved on without it.
+            self._unseeded.add(zone.name)
         self._mark_dirty(zone, f"zone {'enabled' if enabled else 'disabled'}", kind="enable")
         return True
 
@@ -417,8 +520,11 @@ class Engine:
         """The controller device's global enable (section 11, decision 1)."""
         changed = False
         for zone in self.zones.values():
+            was_running = zone.running
             if zone.set_enabled(plugin_enabled=enabled):
                 changed = True
+                if zone.running and not was_running:
+                    self._unseeded.add(zone.name)
                 self._mark_dirty(
                     zone,
                     f"plugin {'enabled' if enabled else 'disabled'}",
@@ -460,6 +566,10 @@ class Engine:
 
         self.zones = rebuilt
         self.config = new_config
+        # Every zone was rebuilt from the file, and a zone switched on by that
+        # edit has never looked at the room it is now responsible for (R13 put
+        # the override back; it cannot put back a reading nobody took).
+        self._unseeded = set(rebuilt)
 
         # Backoff and echo records are facts about the hardware, not about the
         # file, so they survive -- but only for devices some zone still owns,
@@ -536,3 +646,8 @@ class Engine:
     def wakes(self) -> dict:
         """Each zone's scheduled wake-up. Read-only."""
         return dict(self._wakes)
+
+    @property
+    def unseeded(self) -> tuple:
+        """Zones that have not yet read their input devices. Read-only."""
+        return tuple(sorted(self._unseeded))
