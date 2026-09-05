@@ -9,7 +9,13 @@ Each is persisted for a reason that is not obvious until it is missing:
 
 * **presence_last_seen** -- without it a restart in an occupied room starts
   from "nobody has ever been here" and turns the lights off on the person
-  standing in it.
+  standing in it. It is the only half of presence that is persisted: which
+  sensors are reporting *now* is deliberately NOT written down, because it is
+  a fact about the room rather than about the plugin, and a stale set read
+  off a device would hold a zone occupied on a sensor that had gone off while
+  the plugin was stopped. ``Engine._seed_zone`` rebuilds it from the devices
+  at startup instead. (A config *reload* is different: the plugin never
+  stopped, so ``rebuild_zone`` carries the live set across.)
 * **the override** -- the point of R13. It carries its own
   ``duration_minutes`` and ``extend_minutes`` because the period that created
   it may not be the period it expires in (section 11, decision 4).

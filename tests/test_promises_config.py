@@ -239,7 +239,9 @@ def test_hot_reload_preserves_presence_last_seen():
     "presence_last_seen", complain)` -> `last_seen = None`.
     """
     zone = a_zone()
+    # A PIR: it trips and drops again, and the hold runs from the drop.
     zone.ingest_presence(101, True, LOCKED_AT)
+    zone.ingest_presence(101, False, LOCKED_AT)
     assert zone.evaluate(LOCKED_AT, "presence edge").to_state is ZoneState.OCCUPIED
 
     # No override at all: this promise is the other half of the state, and a

@@ -87,7 +87,12 @@ def live_zone(periods, sun=SUN, today=TODAY, **fields):
 def occupied(zone, now=EVENING, lux=1800):
     """Drive `zone` to OCCUPIED and assert it got there."""
     zone.ingest_lux(lux, now)
+    # A PIR trip: on, then immediately off. The sensor is not left reporting,
+    # so the hold is running from `now` and every timing assertion below is
+    # about the hold rather than about a sensor that is still on. A LEVEL
+    # sensor left on is a different case with its own tests.
     zone.ingest_presence(101, True, now)
+    zone.ingest_presence(101, False, now)
     zone.evaluate(now, "setup")
     assert zone.state is ZoneState.OCCUPIED
     return zone

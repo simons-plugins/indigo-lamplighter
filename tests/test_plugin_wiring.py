@@ -1068,7 +1068,10 @@ def test_explain_zone_dry_runs_the_moment_it_was_asked_about(install):
     zone = the_plugin.engine.zones["Hallway"]
     # The room was last seen a minute before the evening instant, so the
     # five-minute hold is still running there and long gone by the next day.
+    # Trip and drop, so the five-minute hold runs from 21:59 rather than a
+    # sensor being left on (which would hold the room open indefinitely).
     zone.ingest_presence(101, True, dt.datetime(2026, 9, 4, 21, 59))
+    zone.ingest_presence(101, False, dt.datetime(2026, 9, 4, 21, 59))
 
     evening = the_plugin.explain_zone(an_action(zone_name="Hallway", at="2026-09-04T22:00"))
     daytime = the_plugin.explain_zone(an_action(zone_name="Hallway", at="2026-09-05T12:00"))
@@ -1090,7 +1093,10 @@ def test_explain_zone_changes_nothing_about_the_zone_it_is_asked_about(install):
     a question about midnight turns the lights off now."""
     the_plugin = no_writes(started(a_document(two_period_hallway())))
     zone = the_plugin.engine.zones["Hallway"]
+    # Trip and drop, so the five-minute hold runs from 21:59 rather than a
+    # sensor being left on (which would hold the room open indefinitely).
     zone.ingest_presence(101, True, dt.datetime(2026, 9, 4, 21, 59))
+    zone.ingest_presence(101, False, dt.datetime(2026, 9, 4, 21, 59))
     before = (zone.state, zone.evaluations_today, zone.writes_today, zone.last_trigger)
     light = indigo.devices[201].states.copy()
     dirty = the_plugin.engine.dirty

@@ -363,7 +363,9 @@ def test_a_stale_lux_reading_says_so():
     from lamplighter.lux import STALE_AFTER_SECONDS
 
     zone = a_zone()
+    # A PIR: it trips and drops again, and the hold runs from the drop.
     zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
     zone.ingest_lux(1800, NOW)
     zone.evaluate(NOW, "startup")
 

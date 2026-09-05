@@ -217,10 +217,14 @@ class Zone:
         """One presence reading. True if it was an input edge (R4).
 
         Called on the Indigo callback thread, so it does the minimum: update
-        the timestamp, answer whether anything moved. A REFRESHED edge is
-        true here -- the hold now expires later, so the worker's wake-up must
-        be rescheduled -- but it will produce no transition, and therefore no
-        write, when the state machine runs.
+        the reporting set, answer whether anything moved.
+
+        A CLEARED edge -- a sensor going off -- is true here, and that is not
+        the old behaviour. While a sensor is on there is no hold running at
+        all, so the moment it clears is the moment a wake-up has to be
+        scheduled; a worker that never heard about it would sleep through the
+        room emptying. It still produces no transition of its own: the room
+        is occupied for ``hold_seconds`` more.
         """
         if device_id not in self.config.presence_devices:
             return False
@@ -743,6 +747,10 @@ class Zone:
         """
         candidates = [dt.datetime.combine(now.date() + periods_module.ONE_DAY, dt.time())]
 
+        # None while any presence device is still reporting, and that is the
+        # point: there is no hold to expire until the room clears. Scheduling
+        # one anyway is how a zone on a level sensor wakes up in the middle
+        # of somebody sitting still and puts itself VACANT.
         hold_expiry = self.presence.expiry(self.config.hold_seconds)
         if hold_expiry is not None:
             candidates.append(hold_expiry)
@@ -810,11 +818,7 @@ class Zone:
         parts = [
             f"period={period.name if period else 'none'}",
             f"presence={'active' if presence_active else 'inactive'}"
-            + (
-                f" (last seen {self.presence.last_seen:%H:%M:%S})"
-                if self.presence.last_seen
-                else " (never seen)"
-            ),
+            + f" ({self._presence_phrase()})",
             f"lux={self._lux_phrase(now, dark)}",
             f"override={self.override.device_id if self.override else 'none'}",
         ]
@@ -871,6 +875,25 @@ class Zone:
             text=text,
         )
 
+    def _presence_phrase(self) -> str:
+        """Why presence reads the way it does: who is on, or how long ago.
+
+        The two are genuinely different states and the line has to say which.
+        "active" with a sensor still on means the room is held open for as
+        long as that sensor says so; "active" on the hold means it is
+        counting down and the reader can work out from when. Collapsing them
+        into "last seen 20:14:03" is what made the Study's radar look like a
+        sensor that had stopped reporting.
+        """
+        if self.presence.on_devices:
+            names = ", ".join(
+                _device_label(dev_id) for dev_id in sorted(self.presence.on_devices)
+            )
+            return f"{names} on"
+        if self.presence.last_seen is None:
+            return "never seen"
+        return f"hold, last seen {self.presence.last_seen:%H:%M:%S}"
+
     def _lux_phrase(self, now: dt.datetime, dark: bool) -> str:
         if self.config.lux is None:
             return "no sensor (this zone has no daylight gate)"
@@ -914,6 +937,21 @@ class Zone:
             "overrides_today": self.overrides_today,
             "last_trigger": self.last_trigger,
         }
+
+
+def _device_label(dev_id) -> str:
+    """A presence device's name for the explain line, or its id.
+
+    A label and only a label: it never gates anything, so a lookup that will
+    not answer falls back to the id rather than taking the line down. The
+    zone's unavailable-lights list is where a device that cannot be resolved
+    is actually reported.
+    """
+    try:
+        name = getattr(devices.get_device(dev_id), "name", "")
+    except (devices.DeviceGone, devices.LookupFailed):
+        return f"device {dev_id}"
+    return str(name) or f"device {dev_id}"
 
 
 def _capped(level, limit):

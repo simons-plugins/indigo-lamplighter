@@ -191,9 +191,11 @@ def test_a_genuine_presence_edge_replans_exactly_once():
     # The room empties.
     zone.ingest_presence(101, False, at(seconds=10))
     zone.ingest_presence(102, False, at(seconds=10))
-    # The hold runs from the last sighting at second 2, so it expires at 302.
-    assert zone.evaluate(at(seconds=301), "reconcile tick") is None
-    assert zone.evaluate(at(seconds=302), "presence hold expired").to_state is ZoneState.VACANT
+    # The hold runs from the moment the LAST sensor cleared, at second 10, so
+    # it expires at 310 -- not from the last "on" at second 2. Until second 10
+    # a sensor was still reporting and there was no hold running at all.
+    assert zone.evaluate(at(seconds=309), "reconcile tick") is None
+    assert zone.evaluate(at(seconds=310), "presence hold expired").to_state is ZoneState.VACANT
 
     # ...and somebody comes back. This is the transition an over-correction
     # swallows: the device has reported before, so a gate keyed on "have we

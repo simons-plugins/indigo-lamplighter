@@ -153,11 +153,33 @@ that fed the decision (R14).
 
 - `presence_devices`: any Indigo device with an on/off state, any-of.
   Occupatum zone devices are accepted as one such device during migration.
-- `hold_seconds`: how long after the last "on" reading presence stays active.
-  A raw PIR with a 10 s hardware hold and `hold_seconds: 300` behaves like an
-  Occupatum zone with a 300 s off-delay, without the ticking device.
-- `last_seen` is updated only on an edge to "on" or a re-report of "on"; it is
-  persisted (R13) so a restart does not turn the lights off on an occupied room.
+- **The rule is Occupatum's: the zone is occupied while ANY presence device is
+  on, and the off-delay starts only when the LAST one clears.** Not
+  `now - last_seen < hold`, which is a different rule that happens to agree
+  for edge sensors and fails for level ones.
+- `hold_seconds`: how long the zone stays occupied *after the last sensor
+  clears*. A raw PIR with a 10 s hardware hold and `hold_seconds: 300` behaves
+  like an Occupatum zone with a 300 s off-delay, without the ticking device.
+  `hold_seconds: 0` means "follow the sensors exactly": occupied while one is
+  on, empty the instant the last goes off.
+- **Level sensors are why this matters.** An mmWave radar (Aqara FP1) reports
+  "on" once when somebody enters and then says nothing until they leave. A
+  hold measured from the last "on" ages that single reading out and turns the
+  lights off with the person sitting still — which is what the Study did. A
+  PIR re-reports on movement and hides the bug; a radar does not.
+- While any sensor is on there is **no hold running**, so no hold wake-up is
+  scheduled. The wake is scheduled when the last sensor clears.
+- Two pieces of state, and only one is persisted:
+  - the set of devices currently reporting — rebuilt at startup by reading the
+    devices themselves, because who is on *now* is a fact about the room, not
+    about what the plugin believed when it stopped. A radar that has been on
+    since before a restart is picked up by seeding and holds the zone.
+  - `last_seen` — stamped on an "on" reading *and on an "off"* (the clear is
+    when the delay starts), and persisted (R13) so a restart does not turn the
+    lights off on an occupied room.
+- An "off" reading is therefore an input edge: it is the only notice the
+  worker gets that a hold has begun and a wake-up is now due. It is not a
+  state edge — the room stays occupied for `hold_seconds` more.
 
 ### 5.5 Periods
 

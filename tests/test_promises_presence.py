@@ -1,23 +1,42 @@
 """Presence hold lives in the zone (PRD R4, R10, R13; sections 5.2, 5.4).
 
 Raw sensors -- PIR, mmWave radar, door contacts, or an Occupatum zone device
-during migration -- feed one per-zone last-seen timestamp and one hold. No
-second plugin is needed to say "still here", and no device needs to tick.
+during migration -- feed one per-zone reporting set and one hold. No second
+plugin is needed to say "still here", and no device needs to tick.
+
+The rule these all rest on is Occupatum's: **occupied while any sensor is on,
+and the off-delay starts when the last one clears.** Two sensor kinds make
+that concrete, and the tests below keep both honest:
+
+* an *edge* sensor (a PIR) trips and drops again straight away, so the hold
+  is doing all the work;
+* a *level* sensor (the Study's Aqara FP1 radar) reports "on" once and then
+  says nothing at all until the room empties, so the reporting set is doing
+  all the work and the hold does not start until it clears.
 """
 
 import datetime as dt
 import logging
 
 import pytest
-from helpers import make_period, make_zone
+from helpers import (
+    FixedSun,
+    RecordingCommander,
+    make_config,
+    make_device,
+    make_period,
+    make_zone,
+)
 
 from lamplighter import compare, persist
+from lamplighter.engine import Engine
 from lamplighter.zone import ZoneState
 
 # 20:00, inside the Evening band and after the fixed sun's sunset, so the
 # only things moving in these tests are the ones each test moves.
 NOW = dt.datetime(2026, 9, 4, 20, 0, 0)
 HOLD = 300
+LOG = logging.getLogger("test.promises.presence")
 
 
 @pytest.fixture(autouse=True)
@@ -111,25 +130,31 @@ def test_presence_is_any_of_the_zones_devices():
 
 
 def test_a_re_report_of_on_refreshes_last_seen_without_replanning():
-    """A repeated "on" reading moves last_seen forward even though it is not
-    an input edge and causes no re-plan (R4 + section 5.4).
+    """A repeated "on" reading moves the hold forward even though it is not a
+    state edge and causes no re-plan (R4 + section 5.4).
 
     Kills: fixing the re-plan storm by ignoring repeated "on" readings
-    entirely, which stops the hold ever being refreshed and empties an
-    occupied room after `hold_seconds`.
+    entirely, which stops the hold ever being refreshed and empties a room
+    somebody is still walking about in.
 
-    Mutation applied: Presence.update's `self.last_seen = now` ->
-    `self.last_seen = self.last_seen or now`.
+    Mutation applied: Presence.update's `self.last_seen = now` on the "on"
+    path -> `self.last_seen = self.last_seen or now`. Note the assertion
+    order below: last_seen is checked immediately after the "on" and before
+    the matching "off", because the "off" stamps it too and would otherwise
+    mask the mutation entirely.
     """
     zone = a_zone()
     zone.ingest_lux(1800, NOW)
+    # A PIR: it trips and drops again, and the hold runs from the drop.
     zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
     assert zone.evaluate(NOW, "presence edge").to_state is ZoneState.OCCUPIED
     assert zone.next_wake(NOW) == at(seconds=HOLD)
 
-    # The Occupatum countdown: the same "on", again, 100 seconds later.
+    # Somebody moves again 100 seconds later and the PIR trips a second time.
     assert zone.ingest_presence(101, True, at(seconds=100)) is True
-    assert zone.presence.last_seen == at(seconds=100)
+    assert zone.presence.last_seen == at(seconds=100), "the on reading moves the hold"
+    zone.ingest_presence(101, False, at(seconds=100))
     assert zone.next_wake(at(seconds=100)) == at(seconds=100 + HOLD)
 
     # It moved the timer and nothing else: no transition, so nothing is
@@ -137,7 +162,7 @@ def test_a_re_report_of_on_refreshes_last_seen_without_replanning():
     assert zone.evaluate(at(seconds=100), "presence re-report") is None
     assert zone.state is ZoneState.OCCUPIED
 
-    # The hold now runs from the second sighting. Under the mutation the room
+    # The hold now runs from the second trip. Under the mutation the room
     # empties here, with somebody still standing in it.
     assert zone.evaluate(at(seconds=350), "hold check") is None
     assert zone.state is ZoneState.OCCUPIED
@@ -156,7 +181,9 @@ def test_hold_expiry_turns_the_lights_off_exactly_once():
     """
     zone = a_zone()
     zone.ingest_lux(1800, NOW)
+    # A PIR: it trips and drops again, and the hold runs from the drop.
     zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
     zone.evaluate(NOW, "presence edge")
 
     assert zone.evaluate(at(seconds=299), "reconcile tick") is None
@@ -187,7 +214,9 @@ def test_unlock_on_leave_fires_from_hold_expiry_with_an_override_held():
     """
     zone = a_zone(override={"duration_minutes": 60, "unlock_on_leave": True})
     zone.ingest_lux(1800, NOW)
+    # A PIR: it trips and drops again, and the hold runs from the drop.
     zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
     zone.evaluate(NOW, "presence edge")
 
     # The override is taken with the room OCCUPIED -- the case the fork never
@@ -205,3 +234,188 @@ def test_unlock_on_leave_fires_from_hold_expiry_with_an_override_held():
     assert (move.from_state, move.to_state) == (ZoneState.OVERRIDDEN, ZoneState.VACANT)
     assert zone.override is None
     assert zone.desired_levels(at(seconds=300)) == {201: "off", 202: "off"}
+
+
+# --------------------------------------------- the level sensor (section 5.4)
+#
+# The Study runs an Aqara FP1 radar alongside a PIR. A radar is a LEVEL
+# sensor: one "on" when somebody comes in, silence for as long as they stay,
+# one "off" when they go. Every promise below was broken by measuring presence
+# as `now - last_seen < hold`, and each one broke in the same direction --
+# lights off with somebody sitting still in the room.
+
+
+def test_a_level_sensor_holds_the_zone_occupied_for_as_long_as_it_is_on():
+    """A radar reporting "on" and then nothing is presence, not a stale
+    reading. Two hours of silence from an FP1 means two hours of somebody
+    sitting in the chair.
+
+    Kills: `active()` derived from last_seen alone, which is what the Study
+    ran and why its lights went out on a person reading.
+
+    Mutation applied: Presence.active's `if self.on_devices: return True` ->
+    deleted, so the timestamp decides on its own.
+    """
+    zone = a_zone()
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)  # the radar sees somebody. That is all.
+
+    assert zone.evaluate(NOW, "presence edge").to_state is ZoneState.OCCUPIED
+
+    # Every check for the next two hours, long past the five-minute hold.
+    for minutes in (4, 5, 6, 30, 120):
+        assert zone.evaluate(at(minutes=minutes), "reconcile tick") is None, f"{minutes}m"
+        assert zone.state is ZoneState.OCCUPIED, f"{minutes}m"
+        assert zone.desired_levels(at(minutes=minutes)) == {201: 60, 202: 30}
+
+
+def test_no_hold_wake_is_scheduled_while_a_sensor_is_still_reporting():
+    """The other half, and the one that makes it a *silent* failure.
+
+    Even with `active()` right, a wake-up scheduled at last_seen + hold fires
+    in the middle of an occupancy. The zone would wake, find itself still
+    occupied and do nothing -- but only because `active()` is right; the wake
+    itself is a claim that the room might be empty, and it is wrong.
+
+    Kills: `expiry()` returning last_seen + hold regardless of the reporting
+    set.
+
+    Mutation applied: Presence.expiry's `if self.on_devices: return None` ->
+    deleted.
+    """
+    zone = a_zone()
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    zone.evaluate(NOW, "presence edge")
+
+    assert zone.presence.expiry(HOLD) is None
+    # The only wake-ups left are the period boundary and midnight, both hours
+    # away. Nothing in the next hour claims this room might have emptied.
+    assert zone.next_wake(NOW) > at(seconds=HOLD)
+
+    # And once they leave, the hold is scheduled from THAT moment.
+    zone.ingest_presence(101, False, at(hours=2))
+    assert zone.next_wake(at(hours=2)) == at(hours=2, seconds=HOLD)
+
+
+def test_the_off_delay_starts_when_the_last_sensor_clears():
+    """Occupatum's rule exactly: the delay belongs to the clear, not to the
+    last sighting (section 5.4).
+
+    Kills: leaving `last_seen` untouched on an "off" reading. The hold would
+    then run from whenever the sensor last said "on" -- which for a radar is
+    when the person ARRIVED, so a two-hour visit ends the moment they stand
+    up.
+
+    Mutation applied: Presence.update's `self.last_seen = now` on the "off"
+    path -> deleted.
+    """
+    zone = a_zone()
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    zone.evaluate(NOW, "presence edge")
+
+    # Two hours later they leave. The hold starts HERE.
+    left = at(hours=2)
+    assert zone.ingest_presence(101, False, left) is True
+    assert zone.presence.last_seen == left
+
+    assert zone.evaluate(left, "sensor cleared") is None, "still occupied: the hold runs"
+    assert zone.state is ZoneState.OCCUPIED
+    assert zone.evaluate(left + dt.timedelta(seconds=HOLD - 1), "tick") is None
+    move = zone.evaluate(left + dt.timedelta(seconds=HOLD), "presence hold expired")
+    assert move.to_state is ZoneState.VACANT
+
+
+def test_one_sensor_clearing_does_not_empty_a_room_another_still_reports():
+    """The PIR drops; the radar has not. Any-of applies to the live set, not
+    only to the last reading.
+
+    Kills: treating any "off" as "the room is empty", which is the obvious
+    reading of "the off-delay starts when a sensor clears" and is wrong.
+
+    Mutation applied: Presence.update's `if device_id not in self.on_devices:
+    return Edge.NONE` guard plus the discard -> clear the whole set.
+    """
+    zone = a_zone()
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)          # PIR
+    zone.ingest_presence(102, True, at(seconds=5))  # radar
+    zone.evaluate(NOW, "presence edge")
+
+    zone.ingest_presence(101, False, at(seconds=20))  # the PIR drops
+
+    assert zone.presence.on_devices == {102}
+    assert zone.presence.expiry(HOLD) is None, "the radar is still on"
+    assert zone.evaluate(at(hours=1), "reconcile tick") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+
+def test_a_sensor_already_on_at_startup_is_seeded_and_holds_the_room():
+    """The restart case. Only `last_seen` is persisted, so a zone that came
+    back up would otherwise know nothing about a radar that has been on since
+    before the restart -- and its persisted timestamp is already older than
+    the hold.
+
+    Kills: seeding presence from the persisted record alone. The Study's
+    radar had been on for an hour when the plugin restarted; without reading
+    the device the zone starts VACANT and turns the lights off.
+
+    Mutation applied: Engine._seed_zone's `if presence_is_on(device):
+    zone.ingest_presence(device_id, True, now)` -> deleted.
+    """
+    make_device(101, "relay", name="Study - Radar", onState=True)
+    make_device(201, "dimmer", name="Study Lamp")
+    make_device(202, "dimmer", name="Study Strip")
+    config = make_config(
+        [
+            {
+                "name": "Study",
+                "presence_devices": [101],
+                "hold_seconds": HOLD,
+                "lux": None,
+                "lights": [201, 202],
+                "periods": [
+                    make_period("Evening", "18:00", "23:00", levels={"201": 60, "202": 30})
+                ],
+            }
+        ]
+    )
+    engine = Engine(config, FixedSun(), RecordingCommander(), logger=LOG)
+    zone = engine.zones["Study"]
+
+    engine.seed_inputs(NOW)
+
+    assert zone.presence.on_devices == {101}, "the radar was on; the zone must know"
+
+    # Well past the hold, with nothing on the device bus at all.
+    engine.mark_all_dirty("startup")
+    engine.tick(NOW)
+    assert zone.state is ZoneState.OCCUPIED
+    assert engine.tick(at(minutes=30)) is not None
+    assert zone.state is ZoneState.OCCUPIED, "a seeded level sensor holds the room"
+
+
+def test_explain_says_which_sensor_is_holding_the_room():
+    """"active" has two causes now and the line has to say which.
+
+    A reader who sees only "last seen 20:00:03" two hours later concludes the
+    sensor has stopped reporting, when in fact it is on and that is precisely
+    why the room is occupied.
+
+    Kills: reporting last_seen whatever the reporting set holds.
+    """
+    zone = a_zone()
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    zone.evaluate(NOW, "presence edge")
+
+    line = zone.explain(at(hours=2))
+    assert "presence=active" in line
+    assert "on)" in line, line
+    assert "last seen" not in line, "a sensor that is ON is not a stale sighting"
+
+    zone.ingest_presence(101, False, at(hours=2))
+    zone.evaluate(at(hours=2), "sensor cleared")
+    held = zone.explain(at(hours=2))
+    assert "presence=active (hold, last seen 22:00:00)" in held, held

@@ -68,7 +68,12 @@ def occupied_zone(levels=None, lights=(201, 202), **fields):
         logger=LOG,
         **fields,
     )
+    # A PIR trip: on, then immediately off. The sensor is not left reporting,
+    # so the hold is running from `now` and every timing assertion below is
+    # about the hold rather than about a sensor that is still on. A LEVEL
+    # sensor left on is a different case with its own tests.
     zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
     assert zone.evaluate(NOW, "startup").to_state is ZoneState.OCCUPIED
     return zone
 
@@ -648,8 +653,11 @@ def test_override_extends_while_presence_is_active():
     override = zone.start_override(201, NOW)
     assert override.expires_at == at(minutes=60)
 
-    # The room is still in use at the expiry: somebody is standing in it.
+    # The room is still in use at the expiry: somebody moves at minute 59, so
+    # the hold is still running a minute later. (Trip and drop: a sensor left
+    # ON would hold the room for ever and the override would never end.)
     zone.ingest_presence(101, True, at(minutes=59))
+    zone.ingest_presence(101, False, at(minutes=59))
     assert zone.evaluate(at(minutes=60), "override expiry") is not None
     assert zone.state is ZoneState.OVERRIDDEN
     assert zone.override is not None, "an occupied room must not lose its override"

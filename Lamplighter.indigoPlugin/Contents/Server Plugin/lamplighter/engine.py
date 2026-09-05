@@ -398,7 +398,16 @@ class Engine:
                 continue
             devices.forget_warnings(device_id)
             if presence_is_on(device):
+                # This is what rebuilds `presence.on_devices` after a restart.
+                # Only `last_seen` is persisted (R13); who is reporting *now*
+                # is a fact about the room, so it is read from the room. A
+                # level sensor that has been on since before the restart is
+                # picked up here and holds the zone occupied, which a
+                # persisted timestamp on its own could not do.
                 zone.ingest_presence(device_id, True, now)
+            # Deliberately no `else: ingest(..., False, ...)`. An "off" now
+            # stamps last_seen, so seeding the off devices would push the hold
+            # forward on every seed and an empty room would never time out.
 
         zone.read_lux(now)
 

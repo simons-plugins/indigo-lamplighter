@@ -136,6 +136,11 @@ def test_an_evening_in_one_zone():
     now = clock.at(seconds=10)
     edges = engine.device_updated(*presence(101, False, True), now)
     assert [edge.kind for edge in edges] == ["presence"]
+    # The PIR's own hardware hold is short and it drops again immediately.
+    # THAT is what starts the zone's 300 s hold: while a sensor is reporting
+    # there is no hold running at all. A level sensor (the Study's radar)
+    # would stay on here and hold the room open until it cleared.
+    engine.device_updated(*presence(101, True, False), now)
     assert engine.dirty == {"Kitchen": "presence: Dev-101"}
     assert commander.commands == [], "the callback thread never writes"
 
