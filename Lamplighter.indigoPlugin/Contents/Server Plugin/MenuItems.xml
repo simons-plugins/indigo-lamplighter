@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<!-- PRD 5.13. An empty <MenuItem/> is a separator: undocumented, but it is
+<!-- PRD 5.13. An empty <MenuItem id="separator1" type="separator"/> is a separator: undocumented, but it is
      what the installed plugins do and it is what Indigo renders. -->
 
 <MenuItems>
@@ -11,7 +11,7 @@
         <Name>Explain all zones</Name>
         <CallbackMethod>explain_all_zones</CallbackMethod>
     </MenuItem>
-    <MenuItem/>
+    <MenuItem id="separator1" type="separator"/>
     <MenuItem id="reload_config_now">
         <Name>Reload configuration now</Name>
         <CallbackMethod>reload_config_now</CallbackMethod>
