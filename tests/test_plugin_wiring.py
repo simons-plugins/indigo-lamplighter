@@ -1428,3 +1428,165 @@ def test_the_load_record_is_published_before_any_zone_work(install, monkeypatch)
     states = controller_device().states
     assert states["config_loaded_at"] == "2026-09-05T04:05:06"
     assert states["config_zone_count"] == 2
+
+
+# ------------------------------------------- states added by an upgrade
+#
+# The gap this section closes is in the fake `indigo`, not in the plugin.
+# conftest's stub accepts any state key you hand it, so every test above
+# passes whether or not Indigo would have taken the update -- which is why
+# adding `config_loaded_at`/`config_zone_count` looked perfect here and then
+# logged `state key config_zone_count not defined (ignoring update request)`
+# twice on the first start on jarvis.
+#
+# The device below is the missing half: it refuses keys it has not been told
+# about, and learns them only when the plugin calls
+# stateListOrDisplayStateIdChanged() -- which is exactly Indigo's contract for
+# a device that predates the states its type now declares.
+
+
+class UpgradedDevice(indigo.Device):
+    """A device created before its type declared its newest states.
+
+    `known` is what Indigo currently believes this device has. Anything else
+    is refused and recorded in `rejected`, the way the server drops the key
+    and logs about it, until `stateListOrDisplayStateIdChanged()` teaches it
+    `learns` -- the state list as the bundle now declares it.
+    """
+
+    def __init__(self, *args, known=(), learns=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.known_states = set(known) | {"onState", "onOffState"}
+        self.learns = set(learns) | {"onState", "onOffState"}
+        self.rejected = []
+
+    def stateListOrDisplayStateIdChanged(self):
+        super().stateListOrDisplayStateIdChanged()
+        self.known_states = set(self.learns)
+
+    def updateStateOnServer(self, key, value=None, **kwargs):
+        if key not in self.known_states:
+            self.rejected.append(key)
+            return
+        super().updateStateOnServer(key, value, **kwargs)
+
+
+#: The two states 2026.1.2 added to the controller. A device from before it
+#: has every other controller state and neither of these.
+STATES_ADDED_BY_THE_UPGRADE = ("config_loaded_at", "config_zone_count")
+
+
+def an_upgraded_controller(dev_id=900500):
+    """A controller device as it exists on a server upgraded in place."""
+    declared = set(indigo_sync.CONTROLLER_STATE_KEYS)
+    dev = UpgradedDevice(
+        dev_id,
+        name="Lamplighter Controller",
+        onState=True,
+        known=declared - set(STATES_ADDED_BY_THE_UPGRADE),
+        learns=declared,
+    )
+    dev.pluginId = plugin_module.PLUGIN_ID
+    dev.deviceTypeId = plugin_module.CONTROLLER_TYPE_ID
+    indigo.devices[dev_id] = dev
+    return dev
+
+
+def test_a_controller_from_before_the_upgrade_rejects_the_new_states_at_startup(install):
+    """First, prove the fake can now see the failure at all.
+
+    This test exists to keep `UpgradedDevice` honest. If it ever stops
+    recording a rejection, the republish test below would pass against a
+    device that never needed republishing, and both would be worthless.
+    """
+    write_config(a_document())
+    make_device(101, "relay", name="Hallway Motion")
+    make_device(201, "relay", name="Hallway Light")
+    dev = an_upgraded_controller()
+
+    make_plugin().startup()
+
+    assert "config_zone_count" in dev.rejected
+    assert "config_zone_count" not in dev.states
+    assert "config_loaded_at" not in dev.states
+    # And the states it DID know about were accepted, so this is a device that
+    # is half-updated rather than one that is simply broken.
+    assert dev.states["config_status"] == "ok"
+
+
+def test_device_start_comm_fills_in_the_states_the_upgrade_added(install):
+    """The fix. Kills: dropping the republish from deviceStartComm.
+
+    Refreshing the state list is not enough on its own -- it only makes the
+    new keys writable. Something has to write them, and if that is left to
+    the next incidental sync the states a caller polls sit empty for as long
+    as it takes one to come round (twenty seconds, on jarvis).
+    """
+    write_config(a_document())
+    make_device(101, "relay", name="Hallway Motion")
+    make_device(201, "relay", name="Hallway Light")
+    dev = an_upgraded_controller()
+    the_plugin = make_plugin()
+    the_plugin.startup()
+    assert "config_zone_count" not in dev.states
+
+    the_plugin.deviceStartComm(dev)
+
+    assert dev.state_list_refreshed == 1
+    assert dev.states["config_zone_count"] == 1
+    assert dt.datetime.fromisoformat(dev.states["config_loaded_at"])
+
+
+def test_device_start_comm_refreshes_before_it_republishes(install):
+    """Order is the whole fix, and it is invisible in the final state.
+
+    Publishing first and refreshing second leaves exactly the bug being
+    fixed: the write is rejected, and nothing writes again. Made fatal --
+    the device refuses the new keys until it is refreshed, so a republish
+    that ran first would be recorded as a rejection.
+    """
+    write_config(a_document())
+    make_device(101, "relay", name="Hallway Motion")
+    make_device(201, "relay", name="Hallway Light")
+    dev = an_upgraded_controller()
+    the_plugin = make_plugin()
+    the_plugin.startup()
+    dev.rejected.clear()
+
+    the_plugin.deviceStartComm(dev)
+
+    assert dev.rejected == [], f"published before the state list was refreshed: {dev.rejected}"
+
+
+def test_a_zone_device_from_before_an_upgrade_is_filled_in_too(install):
+    """The controller is not a special case; every zone device has the same
+    problem the first time a state is added to the zone type.
+
+    Kills: republishing the controller only.
+    """
+    write_config(a_document())
+    make_device(101, "relay", name="Hallway Motion")
+    make_device(201, "relay", name="Hallway Light")
+    the_plugin = started()
+    old = device_for("Hallway")
+
+    declared = set(indigo_sync.ZONE_DEVICE_STATE_KEYS)
+    upgraded = UpgradedDevice(
+        old.id,
+        name=old.name,
+        known=declared - {"explain", "desired_summary"},
+        learns=declared,
+    )
+    upgraded.pluginId = plugin_module.PLUGIN_ID
+    upgraded.deviceTypeId = plugin_module.ZONE_TYPE_ID
+    upgraded.pluginProps = {"zone_name": "Hallway"}
+    indigo.devices[old.id] = upgraded
+
+    the_plugin.deviceStartComm(upgraded)
+
+    assert upgraded.state_list_refreshed == 1
+    assert upgraded.rejected == []
+    assert upgraded.states["explain"].startswith("Hallway is ")
+    # "leave" because nothing has evaluated this zone yet -- the value is not
+    # the point, having one at all is.
+    assert upgraded.states["desired_summary"] == "201=leave"

@@ -227,9 +227,12 @@ class Plugin(indigo.PluginBase):
         The publish is *in here* rather than left to the caller so that the
         record and the announcement cannot come apart: a timestamp that only
         reaches the device on the next worker pass is one a poller cannot
-        distinguish from a pass that did nothing. At first start the
-        controller device does not exist yet and this is a no-op; the
-        ``_sync_all()`` at the end of ``startup`` publishes it.
+        distinguish from a pass that did nothing.
+
+        At startup this publish is a no-op and is meant to be: it runs
+        before ``_refresh_device_map``, so there is no controller id yet. The
+        ``_sync_all()`` at the end of ``startup`` and the republish in
+        ``deviceStartComm`` are what put the record on the device there.
         """
         self._config_loaded_at = now.strftime("%Y-%m-%dT%H:%M:%S")
         self._config_zone_count = len(config.zones)
@@ -347,20 +350,51 @@ class Plugin(indigo.PluginBase):
             )
 
     def deviceStartComm(self, dev):
-        # New states added to a device type after the devices exist are not
-        # visible until this is called. Without it, an upgrade leaves every
-        # zone device stuck on the states it had at creation.
+        """Indigo has (re)learned this device. Refresh its states, then fill them.
+
+        Two halves, and the second is the one an upgrade needs.
+
+        ``stateListOrDisplayStateIdChanged`` is what makes states added to a
+        device type *after* its devices exist visible at all. Until it runs,
+        Indigo refuses any update naming one of the new keys -- it logs
+        ``state key <x> not defined (ignoring update request)`` and drops it
+        -- so on the first start after an upgrade every publish from
+        ``startup`` is rejected for exactly the states that were just added.
+
+        So the refresh is not enough on its own: the values that were
+        rejected have to be written again, here, now that Indigo will accept
+        them. Without this republish the new states sit empty until something
+        incidental syncs -- observed on jarvis as `config_zone_count` blank
+        for twenty seconds after a restart, which for a state whose whole job
+        is to be polled is indistinguishable from "no configuration loaded".
+        """
         dev.stateListOrDisplayStateIdChanged()
         if self.engine is None:
+            # startup() raised; there are no states to write. The refresh
+            # above still mattered, and the next successful start republishes.
             return
-        zone_name = self._zone_name_of(dev)
-        if dev.deviceTypeId == ZONE_TYPE_ID and zone_name in self.engine.zones:
-            self._zone_device_ids[zone_name] = dev.id
-            self._warned_orphans.discard(dev.id)
-            self._sync_zone(self.engine.zones[zone_name])
-        elif dev.deviceTypeId == CONTROLLER_TYPE_ID:
+
+        if dev.deviceTypeId == CONTROLLER_TYPE_ID:
             self._controller_id = dev.id
             self._sync_controller()
+            return
+
+        if dev.deviceTypeId != ZONE_TYPE_ID:
+            return
+
+        zone_name = self._zone_name_of(dev)
+        zone = self.engine.zones.get(zone_name)
+        if zone is None:
+            # A device whose zone has left the configuration. It is not ours
+            # to fill in -- _mark_orphan_devices owns what it says -- but it
+            # has still just had its state list refreshed, and it must not be
+            # claimed by the device map.
+            self._mark_orphan_devices()
+            return
+
+        self._zone_device_ids[zone_name] = dev.id
+        self._warned_orphans.discard(dev.id)
+        self._sync_zone(zone)
 
     def runConcurrentThread(self):
         try:
