@@ -25,6 +25,7 @@ from helpers import (
 
 from lamplighter import compare
 from lamplighter.engine import Engine, presence_is_on, presence_reading
+from lamplighter.reconcile import COMMAND_RECHECK_SECONDS
 from lamplighter.zone import ZoneState
 
 LOGGER_NAME = "test.engine"
@@ -360,9 +361,16 @@ def test_a_period_boundary_wakes_a_quiet_zone():
     engine.tick(clock.now)
     assert zone.state is ZoneState.OCCUPIED
 
+    # The lights were just commanded, so the next wake is the five-second
+    # re-check and not the boundary. It finds them where they were asked to
+    # be, sends nothing, and the zone's own timers take over again.
+    recheck = EVENING + dt.timedelta(seconds=COMMAND_RECHECK_SECONDS)
+    assert engine.wakes["Kitchen"] == recheck
+    assert engine.tick(recheck).commands == ()
+
     boundary = dt.datetime(2026, 9, 4, 21, 0)
     assert engine.wakes["Kitchen"] == boundary
-    assert engine.next_wake(clock.now) == EVENING + dt.timedelta(seconds=60), (
+    assert engine.next_wake(recheck) == EVENING + dt.timedelta(seconds=60), (
         "the worker wakes for the earlier of the zone's timer and the "
         "reconcile tick"
     )
@@ -386,6 +394,12 @@ def test_the_periodic_pass_runs_every_reconcile_seconds():
     engine.device_updated(*presence(101, False, True), clock.now)
     engine.tick(clock.now)
     commander.clear()
+
+    # Consume the post-command re-check first. The lights landed, so it sends
+    # nothing and hands the zone back to its own timers -- which is what
+    # leaves the periodic pass as the only thing watching for drift.
+    engine.tick(clock.at(seconds=COMMAND_RECHECK_SECONDS))
+    assert commander.commands == []
 
     # Something else in the house dims the pendants. No event reaches us.
     apply_level(make_device(201, "dimmer", brightness=5), 5)
@@ -776,3 +790,157 @@ def test_a_reload_re_seeds_every_zone():
 
     assert engine.zones["Kitchen"].state is ZoneState.OCCUPIED
     assert engine.zones["Kitchen"].presence.last_seen == clock.now
+
+
+# ------------------------------------------------- the post-command re-check
+#
+# A command is the one thing a zone's own timers know nothing about. Before
+# this existed, a device that simply ignored a command waited for the periodic
+# pass -- up to `reconcile_seconds`, a minute by default -- and a device that
+# was merely slow to report was warned about at that same pass. One wake-up
+# five seconds after any command fixes both, and it is a timer entry rather
+# than a poll: PRD section 9 rules out the settle poll, not the clock.
+
+
+def misses(caplog):
+    """The reconcile "did not reach its desired level" warnings, and only those."""
+    return [r for r in caplog.records if "did not reach" in r.getMessage()]
+
+
+def test_a_command_brings_the_zones_next_wake_forward_to_re_check_it():
+    """Kills: leaving the wake at the zone's own timers after a command.
+
+    The zone would then not look at the device again until a period boundary,
+    a hold expiry or the periodic pass -- whichever came first, and none of
+    them is about the command that was just sent.
+    """
+    engine, zone, clock, _changed = build()
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    summary = engine.tick(clock.now)
+
+    assert summary.commands, "this pass must have sent something to be a test"
+    assert engine.wakes["Kitchen"] == clock.now + dt.timedelta(
+        seconds=COMMAND_RECHECK_SECONDS
+    )
+    # The zone's own next wake is hours away; the re-check is what brought it in.
+    assert zone.next_wake(clock.now) > clock.now + dt.timedelta(seconds=60)
+
+
+def test_an_ignored_command_is_re_sent_about_five_seconds_later_with_one_warning(caplog):
+    """A device that did not listen gets a second command in seconds, not at
+    the next periodic pass.
+
+    Kills: no re-check wake. The retry then waits for the reconcile tick, so a
+    light that missed its command stays wrong for up to a minute -- which for
+    a hallway is the whole of the time somebody is walking through it.
+
+    Mutation applied: Engine._schedule_wake's `recheck if wake is None else
+    min(wake, recheck)` -> `wake`.
+    """
+    commander = RecordingCommander(apply=False)  # nothing ever lands
+    engine, zone, clock, _changed = build(commander)
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        engine.tick(clock.now)
+        assert commander.ids() == [201, 202]
+        assert misses(caplog) == [], "the first command toward a target never warns"
+
+        # Five seconds later, and well before the 60 s periodic pass.
+        commander.clear()
+        recheck = clock.at(seconds=COMMAND_RECHECK_SECONDS)
+        summary = engine.tick(recheck)
+
+    assert commander.ids() == [201, 202], "the ignored command was not re-sent"
+    assert [command.backoff_step for command in summary.commands] == [2, 2]
+    assert len(misses(caplog)) == 2, "one warning per device, at the first genuine miss"
+
+
+def test_a_device_that_lands_by_the_re_check_clears_silently(caplog):
+    """The common case, and the one the false warnings came from.
+
+    A Z-Wave lamp reports back a second or two after being told. The re-check
+    finds it where it was asked to be, clears the ladder and says nothing.
+
+    Kills: warning on the re-check regardless of what the device now reads.
+    """
+    engine, zone, clock, _changed = build()  # the default commander applies
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        engine.tick(clock.now)
+        summary = engine.tick(clock.at(seconds=COMMAND_RECHECK_SECONDS))
+
+    assert summary.commands == (), "nothing to do: the lamps landed"
+    assert misses(caplog) == [], [r.getMessage() for r in caplog.records]
+    assert engine.reconciler.backoff_step(201) == 0, "the ladder was cleared"
+    # And the zone is back on its own timers rather than re-checking for ever.
+    assert engine.wakes["Kitchen"] > clock.at(seconds=COMMAND_RECHECK_SECONDS * 2)
+
+
+def test_the_hallway_false_warning_does_not_come_back(caplog):
+    """The live regression, end to end, four times an evening on jarvis.
+
+    Hold expires -> lamp commanded off -> the PIR re-trips within a minute,
+    before any pass has observed the lamp at off -> the zone wants 80 again.
+    The lamp had done exactly what it was told, twice, and was reported as
+
+        did not reach its desired level. It reads 0 and the zone wants 80
+
+    Kills: any regression that lets a ladder built for one target be read as
+    a failure of the next one -- through the engine, not just the reconciler,
+    because the wake scheduling is what decides when the second look happens.
+    """
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, _changed = build(commander, hold_seconds=300)
+    make_device(101, "relay", onState=False)
+    lamp = make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    # Somebody walks through: the PIR trips and drops, the lamps come on.
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.device_updated(*presence(101, True, False), clock.now)
+    engine.tick(clock.now)
+    assert zone.state is ZoneState.OCCUPIED
+    engine.tick(clock.at(seconds=COMMAND_RECHECK_SECONDS))  # they landed
+
+    # The hold expires. The lamps are commanded off and DO go off.
+    empty = clock.at(seconds=300)
+    commander.clear()
+    summary = engine.tick(empty)
+    assert [command.level for command in summary.commands] == ["off", "off"]
+    assert lamp.brightness == 0
+
+    # The PIR re-trips 30 s later -- before the five-second re-check has been
+    # given a chance to observe the lamps at off, because no worker pass has
+    # run in between. This is the exact gap the false warning came from.
+    back = clock.at(seconds=330)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        engine.device_updated(*presence(101, False, True), back)
+        engine.device_updated(*presence(101, True, False), back)
+        summary = engine.tick(back)
+
+    assert zone.state is ZoneState.OCCUPIED
+    assert [command.level for command in summary.commands] == [60, 30]
+    assert [command.backoff_step for command in summary.commands] == [1, 1], (
+        "a first attempt at a new target, not a retry of the 'off'"
+    )
+    assert misses(caplog) == [], (
+        "the lamp did what it was told twice and was called broken: "
+        + "; ".join(r.getMessage() for r in misses(caplog))
+    )

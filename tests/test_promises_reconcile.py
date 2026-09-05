@@ -281,3 +281,144 @@ def test_a_slow_reporter_is_reconciled_without_a_retry_storm(caplog):
         assert reconciler.run(zone, NOW + TICK * 7) == []
     assert reconciler.backoff_step(201) == 0
     assert commander.ids().count(201) == 3, "no further commands after it landed"
+
+
+# ------------------------------------------------- backoff belongs to a target
+#
+# The Hallway, four times in one evening: the hold expired, the lamp was
+# commanded off, the PIR re-tripped before any pass had seen the lamp at off,
+# and the lamp coming on to 80 was reported as
+#
+#   WARNING ... did not reach its desired level. It reads 0 and the zone
+#   wants 80, so it is being commanded again on a backoff of 1/2/4/8 ticks
+#
+# about a lamp that had done exactly what it was told, twice. The ladder was
+# a record of the "off" command, and it was read as a failure of the "80" one.
+
+
+def a_zone_with_one_lamp():
+    return occupied_zone({"201": 80}, [201])
+
+
+def test_a_new_desired_level_discards_the_old_backoff(caplog):
+    """A change of target is a first command, never a retry.
+
+    Kills: keeping a device's ladder across a change of desired level, which
+    is the live Hallway false warning exactly -- and worse than noise, because
+    the stale ladder can also DELAY the new command by up to eight ticks.
+
+    Mutation applied: Reconciler.run's `if backoff is not None and
+    backoff.level != level: self._clear_backoff(device_id); backoff = None`
+    -> deleted.
+    """
+    zone = a_zone_with_one_lamp()
+    lamp = make_device(201, "dimmer", brightness=80)
+    apply_level(lamp, 80)
+    reconciler = Reconciler(RecordingCommander(), EchoBook(), LOG)
+
+    # The room empties: the lamp is commanded off, and no pass observes it at
+    # off before the person comes back -- which is the whole of the bug.
+    zone.ingest_presence(101, False, NOW)
+    vacant = NOW + dt.timedelta(seconds=400)
+    zone.evaluate(vacant, "hold expired")
+    assert zone.desired_levels(vacant)[201] == "off"
+    assert [command.level for command in reconciler.run(zone, vacant)] == ["off"]
+    assert reconciler.backoff_step(201) == 1, "an unconfirmed command is on the ladder"
+
+    # The PIR re-trips. The lamp still reads 80 because nothing moved it, and
+    # the zone now wants 80 again -- a different target from the one the
+    # ladder is about.
+    back = vacant + dt.timedelta(seconds=30)
+    zone.ingest_presence(101, True, back)
+    zone.evaluate(back, "presence edge")
+    assert zone.desired_levels(back)[201] == 80
+
+    apply_level(lamp, 0)  # the lamp DID go off, and reports it late
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        sent = reconciler.run(zone, back)
+
+    assert [command.level for command in sent] == [80], "commanded, not held back"
+    assert sent[0].backoff_step == 1, "a first attempt at a new target"
+    assert caplog.records == [], (
+        "a lamp that did what it was told twice was reported as broken: "
+        + "; ".join(record.getMessage() for record in caplog.records)
+    )
+
+
+def test_a_new_target_does_not_wait_out_the_old_ladder():
+    """The other half of the same bug, and the one that hurts.
+
+    A device several steps up the ladder has `next_due` many passes away. If
+    the ladder survives a change of target, the zone's brand new command
+    queues behind a failure that was about something else -- and the lights
+    simply do not come on when somebody walks in.
+
+    Kills: the same deletion as above, caught through timing rather than
+    through the log, which is the half a "no warning" assertion misses.
+    """
+    zone = a_zone_with_one_lamp()
+    make_device(201, "dimmer", brightness=40)  # stuck at 40: it never lands
+    reconciler = Reconciler(RecordingCommander(), EchoBook(), LOG)
+
+    # The room empties and the lamp refuses to go off, so the ladder climbs
+    # on the "off" target. Most of these passes are skipped by the backoff,
+    # which is exactly what puts next_due out of reach.
+    zone.ingest_presence(101, False, NOW)
+    vacant = NOW + dt.timedelta(seconds=400)
+    zone.evaluate(vacant, "hold expired")
+    assert zone.desired_levels(vacant)[201] == "off"
+    for step in range(10):
+        reconciler.run(zone, vacant + TICK * step)
+    assert reconciler.backoff_step(201) >= 3
+    assert reconciler.next_due(201) > reconciler.passes + 1, (
+        "the ladder must actually be holding this device off, or the "
+        "assertion below proves nothing"
+    )
+
+    # Somebody walks back in. 80 is a different target and goes out now.
+    back = vacant + TICK * 10
+    zone.ingest_presence(101, True, back)
+    zone.evaluate(back, "presence edge")
+
+    sent = reconciler.run(zone, back)
+    assert [command.level for command in sent] == [80], (
+        "the new command queued behind a ladder about the old target"
+    )
+
+
+def test_a_genuine_miss_on_a_later_target_is_still_reported(caplog):
+    """Quieting the false warning must not quieten the true one.
+
+    Kills: keying `warn_once` on the device alone. The "off" miss latches the
+    key, and a genuine failure to reach 80 later in the evening is then
+    swallowed -- the device would be silently broken.
+
+    Mutation applied: Reconciler._warn_backoff's `backoff_key(device.id,
+    level)` -> `("backoff", device.id)`.
+    """
+    zone = a_zone_with_one_lamp()
+    make_device(201, "dimmer", brightness=0)
+    reconciler = Reconciler(RecordingCommander(), EchoBook(), LOG)
+
+    # A genuine miss on "off": commanded, then commanded again, warning once.
+    zone.ingest_presence(101, False, NOW)
+    vacant = NOW + dt.timedelta(seconds=400)
+    zone.evaluate(vacant, "hold expired")
+    apply_level(make_device(201, "dimmer", brightness=40), 40)
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        reconciler.run(zone, vacant)
+        reconciler.run(zone, vacant + TICK)
+    assert len([r for r in caplog.records if "did not reach" in r.getMessage()]) == 1
+
+    # Now a genuine miss on 80, which is a different condition entirely.
+    back = vacant + TICK * 2
+    zone.ingest_presence(101, True, back)
+    zone.evaluate(back, "presence edge")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        reconciler.run(zone, back)          # first attempt at 80: silent
+        reconciler.run(zone, back + TICK)   # it did not land: report it
+    misses = [r for r in caplog.records if "did not reach" in r.getMessage()]
+    assert len(misses) == 1, "a real failure on a new target must be reported"
+    assert "wants 80" in misses[0].getMessage()

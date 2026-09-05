@@ -21,6 +21,23 @@ listen.
 
 Backoff lives here, keyed by device, and not on the zone: one broken bulb must
 not stall the four working ones beside it.
+
+**Backoff belongs to a device AND the level it was asked for.** A device's
+ladder is a record of one command not landing, so it means nothing once the
+zone wants something else: the next command is a first attempt at a new
+target, not a retry of the old one. Getting this wrong produced four false
+warnings in one evening on the Hallway -- the hold expired, the lamp was
+commanded off, the PIR re-tripped before any pass had seen it at off, and the
+lamp coming on to 80 was reported as "did not reach its desired level. It
+reads 0 and the zone wants 80" about a lamp that was working perfectly.
+
+**A command is re-checked once, five seconds later.** This is not a settle
+poll and not a thread: the reconciler asks the engine to bring that zone's
+next wake-up forward (:data:`COMMAND_RECHECK_SECONDS`), and the ordinary
+worker pass does the looking. It buys the thing the periodic tick could not:
+a device that genuinely ignored a command is re-sent in about five seconds
+rather than up to a full reconcile interval, and a device that simply had not
+reported yet clears silently at the same moment instead of being warned about.
 """
 
 from __future__ import annotations
@@ -38,6 +55,23 @@ from .zone import LEAVE, OFF, ON
 
 #: The backoff ladder, in ticks between attempts, held at the last entry.
 BACKOFF_TICKS = (1, 2, 4, 8)
+
+#: How long after a command the zone is woken to see whether it landed. One
+#: re-check, scheduled through the engine's existing wake mechanism -- there
+#: is still no poll, no sleep and no thread (PRD section 9). Long enough for a
+#: Z-Wave or Zigbee device to report back, short enough that a genuinely
+#: ignored command is retried in seconds rather than at the next periodic pass.
+COMMAND_RECHECK_SECONDS = 5.0
+
+
+def backoff_key(device_id, level):
+    """The ``warn_once`` key for "this device did not reach THIS level".
+
+    The level is part of the key so that a later genuine miss on a different
+    target is reported rather than swallowed by a warning latched for the
+    previous one, while repeats of the same miss stay quiet.
+    """
+    return ("backoff", device_id, level)
 
 
 @dataclass(frozen=True)
@@ -93,14 +127,18 @@ class IndigoCommander:
 
 @dataclass
 class _Backoff:
-    """One device's place on the ladder.
+    """One device's place on the ladder, for one desired level.
 
     ``step`` counts commands sent while the device has not landed; ``next_due``
-    is the pass number at which it may be commanded again.
+    is the pass number at which it may be commanded again; ``level`` is what
+    those commands were asking for. When the zone starts wanting something
+    else the whole entry is discarded -- it is a record of one target not
+    being reached, and it says nothing about the next one.
     """
 
     step: int = 0
     next_due: int = 0
+    level: object = None
 
 
 class Reconciler:
@@ -157,6 +195,17 @@ class Reconciler:
                 self._warn_unreadable(zone, device, exc)
 
             backoff = self._backoff.get(device_id)
+            if backoff is not None and backoff.level != level:
+                # The zone wants something else now. Whatever the old ladder
+                # recorded was about reaching the OLD level, so the command
+                # below is a first attempt and not a retry: no warning, and no
+                # backoff delay in front of it. This is the Hallway bug --
+                # "off" was commanded, the PIR re-tripped before any pass had
+                # seen the lamp at off, and the lamp coming on to 80 was
+                # reported as a failure to reach a level nobody had asked for
+                # when that command was sent.
+                self._clear_backoff(device_id)
+                backoff = None
             if backoff is not None and backoff.next_due > this_pass:
                 self.logger.debug(
                     f"{zone.name}: {device.name} is off desired={level!r} but is "
@@ -167,6 +216,8 @@ class Reconciler:
 
             actual = self._actual(device) if readable else None
             if backoff is not None and backoff.step >= 1:
+                # Reached only on the re-check or a later pass: the first
+                # command toward any target never warns.
                 self._warn_backoff(zone, device, actual, level, backoff.step)
 
             if readable:
@@ -180,7 +231,7 @@ class Reconciler:
 
             self.commander.set_level(device, level)
             zone.writes_today += 1
-            step = self._advance_backoff(device_id, this_pass)
+            step = self._advance_backoff(device_id, this_pass, level)
             sent.append(
                 Command(
                     zone=zone.name,
@@ -217,11 +268,13 @@ class Reconciler:
     def forget(self, device_id=None) -> None:
         """Drop one device's backoff, or all of it (a config reload)."""
         if device_id is None:
+            for known_id in list(self._backoff):
+                self._clear_backoff(known_id)
             self._backoff.clear()
         else:
             self._clear_backoff(device_id)
 
-    def _advance_backoff(self, device_id, this_pass) -> int:
+    def _advance_backoff(self, device_id, this_pass, level) -> int:
         backoff = self._backoff.get(device_id)
         if backoff is None:
             backoff = _Backoff()
@@ -229,6 +282,7 @@ class Reconciler:
         delay = BACKOFF_TICKS[min(backoff.step, len(BACKOFF_TICKS) - 1)]
         backoff.step += 1
         backoff.next_due = this_pass + delay
+        backoff.level = level
         return backoff.step
 
     def _clear_backoff(self, device_id) -> None:
@@ -238,10 +292,13 @@ class Reconciler:
         because a device kept on a slow retry schedule after it started
         answering is a device that takes eight ticks to notice the next
         change. The warning key goes with it, so a *later* failure of the
-        same device is reported afresh rather than latched into silence.
+        same device is reported afresh rather than latched into silence --
+        and the key is the one for the level the ladder was about, which is
+        why the entry is read before it is dropped.
         """
-        self._backoff.pop(device_id, None)
-        compare.reset_warnings(("backoff", device_id))
+        backoff = self._backoff.pop(device_id, None)
+        if backoff is not None:
+            compare.reset_warnings(backoff_key(device_id, backoff.level))
         compare.reset_warnings(unreadable_key(device_id))
 
     # ------------------------------------------------------------ the warnings
@@ -249,7 +306,7 @@ class Reconciler:
     def _warn_backoff(self, zone, device, actual, level, step) -> None:
         compare.warn_once(
             self.logger,
-            ("backoff", device.id),
+            backoff_key(device.id, level),
             f"{zone.name}: {device.name} ({device.id}) did not reach its desired "
             f"level. It reads {actual!r} and the zone wants {level!r}, so it is "
             f"being commanded again on a backoff of "

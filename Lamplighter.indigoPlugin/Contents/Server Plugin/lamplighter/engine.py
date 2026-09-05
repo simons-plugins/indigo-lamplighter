@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from . import devices, persist
 from .lux import read_sensor_value
 from .override import EchoBook, is_manual_override
-from .reconcile import Reconciler
+from .reconcile import COMMAND_RECHECK_SECONDS, Reconciler
 from .zone import Zone
 
 #: The device id recorded for an override created by the `lock zone` action,
@@ -330,6 +330,9 @@ class Engine:
                 if sent:
                     commands.extend(sent)
                     self._notify(zone)
+                    # Only ever brings the wake forward, so the periodic pass
+                    # gets the same re-check as an event-driven one.
+                    self._schedule_wake(zone, now, sent)
 
         return TickSummary(
             transitions=tuple(transitions),
@@ -423,7 +426,7 @@ class Engine:
     def _run_zone(self, zone, now, cause, transitions, commands, handled):
         transition = zone.evaluate(now, cause)
         sent = self.reconciler.run(zone, now) if zone.running else []
-        self._wakes[zone.name] = zone.next_wake(now)
+        self._schedule_wake(zone, now, sent)
         handled.append(zone.name)
         if transition is not None:
             transitions.append(transition)
@@ -431,6 +434,31 @@ class Engine:
             commands.extend(sent)
         if transition is not None or sent:
             self._notify(zone)
+
+    def _schedule_wake(self, zone, now, sent) -> None:
+        """The zone's own next wake, brought forward to re-check a command.
+
+        A command that has just been sent is the one thing the zone's own
+        timers know nothing about, and it is the one thing worth looking at
+        soon: a device either reports back within a few seconds or it did not
+        listen. So a pass that sent anything schedules one wake-up
+        ``COMMAND_RECHECK_SECONDS`` from now, and the ordinary worker loop
+        does the looking.
+
+        This is emphatically not the settle poll PRD section 9 rules out.
+        Nothing sleeps, nothing spawns, and nothing re-reads in a loop: it is
+        one entry in the timer map the engine already keeps, and if the device
+        has landed by then the re-check costs a comparison and clears the
+        ladder silently. What it buys is the difference between retrying an
+        ignored command in five seconds and retrying it at the next periodic
+        pass, up to ``reconcile_seconds`` away.
+        """
+        wake = zone.next_wake(now)
+        if not sent:
+            self._wakes[zone.name] = wake
+            return
+        recheck = now + dt.timedelta(seconds=COMMAND_RECHECK_SECONDS)
+        self._wakes[zone.name] = recheck if wake is None else min(wake, recheck)
 
     def _wake_cause(self, zone, now) -> str:
         """Which timer just fired, named for the log line (R14).
