@@ -1,0 +1,733 @@
+{
+  "plugin_config": {},
+  "zones": [
+    {
+      "name": "Study Auto Lights",
+      "lighting_period_ids": [
+        2,
+        1
+      ],
+      "device_settings": {
+        "on_lights_dev_ids": [
+          1736047509,
+          287885105,
+          1664427354
+        ],
+        "off_lights_dev_ids": [],
+        "luminance_dev_ids": [],
+        "presence_dev_ids": [
+          269015910
+        ]
+      },
+      "minimum_luminance_settings": {
+        "minimum_luminance": 1000,
+        "minimum_luminance_use_variable": false,
+        "minimum_luminance_var_id": null,
+        "luminance_hysteresis": null,
+        "adjust_brightness": false
+      },
+      "behavior_settings": {
+        "lock_duration": 5,
+        "extend_lock_when_active": true,
+        "lock_extension_duration": 5,
+        "unlock_when_no_presence": false,
+        "off_lights_behavior": "do not adjust unless no presence"
+      },
+      "advanced_settings": {
+        "exclude_from_lock_dev_ids": []
+      },
+      "device_period_map": {
+        "1664427354": {
+          "1": true,
+          "2": true
+        },
+        "1736047509": {
+          "1": true,
+          "2": true
+        },
+        "287885105": {
+          "1": true,
+          "2": true
+        }
+      },
+      "global_behavior_variables_map": {}
+    },
+    {
+      "name": "Kitchen Auto Lights",
+      "lighting_period_ids": [
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "device_settings": {
+        "on_lights_dev_ids": [
+          772478931,
+          1256902388,
+          1894385558,
+          1990903005,
+          144694384
+        ],
+        "off_lights_dev_ids": [],
+        "luminance_dev_ids": [
+          1616814762
+        ],
+        "presence_dev_ids": [
+          1604547174
+        ]
+      },
+      "minimum_luminance_settings": {
+        "minimum_luminance": null,
+        "minimum_luminance_use_variable": true,
+        "minimum_luminance_var_id": 293227493,
+        "luminance_hysteresis": 300,
+        "adjust_brightness": false
+      },
+      "behavior_settings": {
+        "lock_duration": 60,
+        "extend_lock_when_active": true,
+        "lock_extension_duration": 30,
+        "unlock_when_no_presence": true,
+        "off_lights_behavior": "force off unless zone is locked"
+      },
+      "advanced_settings": {
+        "exclude_from_lock_dev_ids": []
+      },
+      "device_period_map": {
+        "1256902388": {
+          "3": false,
+          "4": 100,
+          "5": 50,
+          "6": 40,
+          "7": 30,
+          "8": false
+        },
+        "144694384": {
+          "3": 30,
+          "4": 100,
+          "5": 100,
+          "6": 100,
+          "7": 100,
+          "8": 60
+        },
+        "1894385558": {
+          "3": 10,
+          "4": 100,
+          "5": 60,
+          "6": 40,
+          "7": 30,
+          "8": 40
+        },
+        "1990903005": {
+          "3": 10,
+          "4": 100,
+          "5": 60,
+          "6": 40,
+          "7": 30,
+          "8": 40
+        },
+        "772478931": {
+          "3": false,
+          "4": 100,
+          "5": 50,
+          "6": 40,
+          "7": 30,
+          "8": false
+        }
+      },
+      "global_behavior_variables_map": {}
+    },
+    {
+      "name": "Living Room Auto Lights",
+      "lighting_period_ids": [
+        9,
+        10,
+        11,
+        12,
+        13,
+        14
+      ],
+      "device_settings": {
+        "on_lights_dev_ids": [
+          398612018,
+          1352318882,
+          1902043497
+        ],
+        "off_lights_dev_ids": [],
+        "luminance_dev_ids": [
+          15464046
+        ],
+        "presence_dev_ids": [
+          912646134
+        ]
+      },
+      "minimum_luminance_settings": {
+        "minimum_luminance": 2500,
+        "minimum_luminance_use_variable": false,
+        "minimum_luminance_var_id": null,
+        "luminance_hysteresis": 500,
+        "adjust_brightness": false
+      },
+      "behavior_settings": {
+        "lock_duration": 60,
+        "extend_lock_when_active": true,
+        "lock_extension_duration": 30,
+        "unlock_when_no_presence": false,
+        "off_lights_behavior": "force off unless zone is locked"
+      },
+      "advanced_settings": {
+        "exclude_from_lock_dev_ids": []
+      },
+      "device_period_map": {
+        "1352318882": {
+          "10": 100,
+          "11": 100,
+          "12": 100,
+          "13": 70,
+          "14": 40,
+          "9": false
+        },
+        "1902043497": {
+          "10": 100,
+          "11": 100,
+          "12": 100,
+          "13": 100,
+          "14": 40,
+          "9": false
+        },
+        "398612018": {
+          "10": 100,
+          "11": 100,
+          "12": 100,
+          "13": 40,
+          "14": false,
+          "9": false
+        }
+      },
+      "global_behavior_variables_map": {}
+    },
+    {
+      "name": "Hallway Auto Lights",
+      "lighting_period_ids": [
+        15,
+        16,
+        17,
+        18
+      ],
+      "device_settings": {
+        "on_lights_dev_ids": [
+          459564566
+        ],
+        "off_lights_dev_ids": [],
+        "luminance_dev_ids": [
+          15464046
+        ],
+        "presence_dev_ids": [
+          88005297,
+          1431405973,
+          1144795941
+        ]
+      },
+      "minimum_luminance_settings": {
+        "minimum_luminance": 4000,
+        "minimum_luminance_use_variable": false,
+        "minimum_luminance_var_id": null,
+        "luminance_hysteresis": 0,
+        "adjust_brightness": false
+      },
+      "behavior_settings": {
+        "lock_duration": -1,
+        "extend_lock_when_active": false,
+        "lock_extension_duration": -1,
+        "unlock_when_no_presence": true,
+        "off_lights_behavior": "do not adjust unless no presence"
+      },
+      "advanced_settings": {
+        "exclude_from_lock_dev_ids": [
+          459564566
+        ]
+      },
+      "device_period_map": {
+        "459564566": {
+          "15": 30,
+          "16": 100,
+          "17": 80,
+          "18": 30
+        }
+      },
+      "global_behavior_variables_map": {}
+    },
+    {
+      "name": "Dining Room Auto Lights",
+      "lighting_period_ids": [
+        19,
+        20,
+        21,
+        22
+      ],
+      "device_settings": {
+        "on_lights_dev_ids": [
+          1371646270,
+          34412681,
+          1935132683,
+          441794359,
+          1628018773,
+          1431420103
+        ],
+        "off_lights_dev_ids": [],
+        "luminance_dev_ids": [
+          15464046
+        ],
+        "presence_dev_ids": [
+          408877607
+        ]
+      },
+      "minimum_luminance_settings": {
+        "minimum_luminance": 2500,
+        "minimum_luminance_use_variable": false,
+        "minimum_luminance_var_id": null,
+        "luminance_hysteresis": 300,
+        "adjust_brightness": false
+      },
+      "behavior_settings": {
+        "lock_duration": 60,
+        "extend_lock_when_active": true,
+        "lock_extension_duration": 30,
+        "unlock_when_no_presence": true,
+        "off_lights_behavior": "force off unless zone is locked"
+      },
+      "advanced_settings": {
+        "exclude_from_lock_dev_ids": []
+      },
+      "device_period_map": {
+        "1371646270": {
+          "19": false,
+          "20": true,
+          "21": false,
+          "22": false
+        },
+        "441794359": {
+          "19": false,
+          "20": 100,
+          "21": 30,
+          "22": false
+        },
+        "1628018773": {
+          "19": false,
+          "20": true,
+          "21": true,
+          "22": false
+        },
+        "1431420103": {
+          "19": false,
+          "20": 75,
+          "21": 50,
+          "22": 30
+        },
+        "34412681": {
+          "19": 20,
+          "20": 100,
+          "21": 50,
+          "22": 30
+        },
+        "1935132683": {
+          "19": 20,
+          "20": 100,
+          "21": 50,
+          "22": 30
+        }
+      },
+      "global_behavior_variables_map": {}
+    },
+    {
+      "name": "Back Garden Auto Lights",
+      "lighting_period_ids": [
+        23,
+        24,
+        25,
+        26,
+        27,
+        28
+      ],
+      "device_settings": {
+        "on_lights_dev_ids": [
+          1445308831,
+          1634365746,
+          1976227552,
+          558991579
+        ],
+        "off_lights_dev_ids": [],
+        "luminance_dev_ids": [
+          15464046
+        ],
+        "presence_dev_ids": [
+          995867965
+        ]
+      },
+      "minimum_luminance_settings": {
+        "minimum_luminance": 100,
+        "minimum_luminance_use_variable": false,
+        "minimum_luminance_var_id": null,
+        "luminance_hysteresis": 0,
+        "adjust_brightness": false
+      },
+      "behavior_settings": {
+        "lock_duration": 60,
+        "extend_lock_when_active": true,
+        "lock_extension_duration": 30,
+        "unlock_when_no_presence": true,
+        "off_lights_behavior": "force off unless zone is locked"
+      },
+      "advanced_settings": {
+        "exclude_from_lock_dev_ids": []
+      },
+      "device_period_map": {
+        "1445308831": {
+          "23": true,
+          "24": false,
+          "25": true,
+          "26": false,
+          "27": false,
+          "28": false
+        },
+        "1634365746": {
+          "23": false,
+          "24": false,
+          "25": true,
+          "26": false,
+          "27": false,
+          "28": false
+        },
+        "1976227552": {
+          "23": false,
+          "24": false,
+          "25": true,
+          "26": false,
+          "27": false,
+          "28": false
+        },
+        "558991579": {
+          "23": false,
+          "24": false,
+          "25": 20,
+          "26": false,
+          "27": false,
+          "28": false
+        }
+      },
+      "global_behavior_variables_map": {}
+    }
+  ],
+  "lighting_periods": [
+    {
+      "name": "All Day Zone",
+      "mode": "On and Off",
+      "from_time_hour": 0,
+      "from_time_minute": 0,
+      "to_time_hour": 23,
+      "to_time_minute": 59,
+      "lock_duration": null,
+      "csrf_token": "ImU4M2I4Y2UxMTA5MGEyOWVjMmU4ODZmZTcxNzYzNjMzNDdlYTdmYzki.Z-sfLw.KVebX1ySOE8I53jKASbKa2J-kus",
+      "id": 1
+    },
+    {
+      "name": "Evening",
+      "mode": "On and Off",
+      "from_time_hour": 19,
+      "from_time_minute": 0,
+      "to_time_hour": 0,
+      "to_time_minute": 0,
+      "lock_duration": null,
+      "limit_brightness": -1,
+      "id": 2
+    },
+    {
+      "name": "Kitchen Overnight",
+      "mode": "On and Off",
+      "from_time_hour": 0,
+      "from_time_minute": 0,
+      "to_time_hour": 6,
+      "to_time_minute": 0,
+      "lock_duration": null,
+      "limit_brightness": -1,
+      "id": 3
+    },
+    {
+      "name": "Kitchen Day",
+      "mode": "On and Off",
+      "from_time_hour": 6,
+      "from_time_minute": 0,
+      "to_time_hour": 16,
+      "to_time_minute": 0,
+      "lock_duration": null,
+      "limit_brightness": -1,
+      "id": 4
+    },
+    {
+      "name": "Kitchen Dusk",
+      "mode": "On and Off",
+      "from_time_hour": 16,
+      "from_time_minute": 0,
+      "to_time_hour": 19,
+      "to_time_minute": 0,
+      "lock_duration": null,
+      "limit_brightness": -1,
+      "id": 5
+    },
+    {
+      "name": "Kitchen Evening",
+      "mode": "On and Off",
+      "from_time_hour": 19,
+      "from_time_minute": 0,
+      "to_time_hour": 20,
+      "to_time_minute": 0,
+      "lock_duration": null,
+      "limit_brightness": -1,
+      "id": 6
+    },
+    {
+      "name": "Kitchen Late Evening",
+      "mode": "On and Off",
+      "from_time_hour": 20,
+      "from_time_minute": 0,
+      "to_time_hour": 22,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 7
+    },
+    {
+      "name": "Kitchen Night",
+      "mode": "On and Off",
+      "from_time_hour": 22,
+      "from_time_minute": 0,
+      "to_time_hour": 23,
+      "to_time_minute": 59,
+      "lock_duration": -1,
+      "limit_brightness": 50,
+      "id": 8
+    },
+    {
+      "id": 9,
+      "name": "Living Room Overnight",
+      "mode": "Off Only",
+      "from_time_hour": 0,
+      "from_time_minute": 0,
+      "to_time_hour": 6,
+      "to_time_minute": 0,
+      "lock_duration": null,
+      "limit_brightness": -1
+    },
+    {
+      "id": 10,
+      "name": "Living Room Morning",
+      "mode": "On and Off",
+      "from_time_hour": 6,
+      "from_time_minute": 0,
+      "to_time_hour": 9,
+      "to_time_minute": 0,
+      "lock_duration": null,
+      "limit_brightness": -1
+    },
+    {
+      "id": 11,
+      "name": "Living Room Day",
+      "mode": "Off Only",
+      "from_time_hour": 9,
+      "from_time_minute": 0,
+      "to_time_hour": 16,
+      "to_time_minute": 0,
+      "lock_duration": null,
+      "limit_brightness": -1
+    },
+    {
+      "id": 12,
+      "name": "Living Room Dusk",
+      "mode": "On and Off",
+      "from_time_hour": 16,
+      "from_time_minute": 0,
+      "to_time_hour": 20,
+      "to_time_minute": 0,
+      "lock_duration": null,
+      "limit_brightness": -1
+    },
+    {
+      "id": 13,
+      "name": "Living Room Evening",
+      "mode": "On and Off",
+      "from_time_hour": 20,
+      "from_time_minute": 0,
+      "to_time_hour": 23,
+      "to_time_minute": 0,
+      "lock_duration": null,
+      "limit_brightness": -1
+    },
+    {
+      "id": 14,
+      "name": "Living Room Night",
+      "mode": "On and Off",
+      "from_time_hour": 23,
+      "from_time_minute": 0,
+      "to_time_hour": 23,
+      "to_time_minute": 59,
+      "lock_duration": null,
+      "limit_brightness": -1
+    },
+    {
+      "name": "Hallway Overnight",
+      "mode": "On and Off",
+      "from_time_hour": 0,
+      "from_time_minute": 0,
+      "to_time_hour": 6,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 15
+    },
+    {
+      "name": "Hallway Day",
+      "mode": "On and Off",
+      "from_time_hour": 6,
+      "from_time_minute": 0,
+      "to_time_hour": 16,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 16
+    },
+    {
+      "name": "Hallway Evening",
+      "mode": "On and Off",
+      "from_time_hour": 16,
+      "from_time_minute": 0,
+      "to_time_hour": 23,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 17
+    },
+    {
+      "name": "Hallway Night",
+      "mode": "On and Off",
+      "from_time_hour": 23,
+      "from_time_minute": 0,
+      "to_time_hour": 23,
+      "to_time_minute": 59,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 18
+    },
+    {
+      "name": "Dining Overnight",
+      "mode": "On and Off",
+      "from_time_hour": 0,
+      "from_time_minute": 0,
+      "to_time_hour": 6,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 19
+    },
+    {
+      "name": "Dining Day",
+      "mode": "On and Off",
+      "from_time_hour": 6,
+      "from_time_minute": 0,
+      "to_time_hour": 16,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 20
+    },
+    {
+      "name": "Dining Evening",
+      "mode": "On and Off",
+      "from_time_hour": 16,
+      "from_time_minute": 0,
+      "to_time_hour": 23,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 21
+    },
+    {
+      "name": "Dining Night",
+      "mode": "On and Off",
+      "from_time_hour": 23,
+      "from_time_minute": 0,
+      "to_time_hour": 23,
+      "to_time_minute": 59,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 22
+    },
+    {
+      "name": "Back Garden Morning",
+      "mode": "On and Off",
+      "from_time_hour": 6,
+      "from_time_minute": 0,
+      "to_time_hour": 8,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 23
+    },
+    {
+      "name": "Back Garden Day",
+      "mode": "Off Only",
+      "from_time_hour": 8,
+      "from_time_minute": 0,
+      "to_time_hour": 16,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 24
+    },
+    {
+      "name": "Back Garden Evening",
+      "mode": "On and Off",
+      "from_time_hour": 16,
+      "from_time_minute": 0,
+      "to_time_hour": 21,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 25
+    },
+    {
+      "name": "Back Garden Late",
+      "mode": "Off Only",
+      "from_time_hour": 21,
+      "from_time_minute": 0,
+      "to_time_hour": 23,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 26
+    },
+    {
+      "name": "Back Garden Night",
+      "mode": "On and Off",
+      "from_time_hour": 23,
+      "from_time_minute": 0,
+      "to_time_hour": 23,
+      "to_time_minute": 59,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 27
+    },
+    {
+      "name": "Back Garden Overnight",
+      "mode": "On and Off",
+      "from_time_hour": 0,
+      "from_time_minute": 0,
+      "to_time_hour": 6,
+      "to_time_minute": 0,
+      "lock_duration": -1,
+      "limit_brightness": -1,
+      "id": 28
+    }
+  ]
+}
