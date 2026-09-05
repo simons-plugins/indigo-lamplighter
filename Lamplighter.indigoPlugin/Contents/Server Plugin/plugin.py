@@ -32,6 +32,7 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 
 try:
     import indigo
@@ -102,6 +103,76 @@ def is_starter_document(document) -> bool:
     telling a new user their starter file is broken is the failure.
     """
     return isinstance(document, dict) and document.get("zones") == []
+
+
+#: What Indigo accepts as an XML tag name. Deliberately narrower than the XML
+#: spec -- no colons, nothing non-ASCII -- because this is the shape that is
+#: known to survive the trip, not the shape a parser would tolerate.
+_XML_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]*$")
+
+#: The value types that cross the bridge. Everything else has to be made into
+#: one of these before it is returned.
+_BRIDGE_TYPES = (bool, int, float, str)
+
+
+def _bridge_safe(payload, where="the return value"):
+    """Return ``payload``, or raise if Indigo could not serialise it.
+
+    Indigo turns an action's return value into **XML**, so every dict key
+    becomes a tag name. That makes the obvious shape for "what each light is
+    set to" -- a map keyed by device id, ``{"459564566": 60}`` -- not a
+    payload at all. It failed on jarvis with ``LowLevelBadParameterError:
+    illegal XML tag name character``, which names neither the key nor the
+    action, and the caller got nothing back.
+
+    Nothing in the test suite could have caught that: the fake ``indigo``
+    hands the dict straight back without serialising it, so the shape looked
+    perfect right up until it reached a real server. This is the check that
+    moves that failure into the suite. Every return in this file goes through
+    it, so the next payload with an id for a key fails here, loudly and by
+    name, instead of quietly on the server.
+
+    The rule it enforces: **keys are words, ids are values.** A key must
+    start with a letter or underscore and hold only letters, digits, ``-``,
+    ``_`` and ``.``; a value must be None, a bool, a number, a string, or a
+    list or dict of those.
+    """
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if not isinstance(key, str) or not _XML_NAME.match(key):
+                raise ValueError(
+                    f"{where}: {key!r} cannot be an XML tag name, so Indigo would "
+                    "refuse this payload at the action bridge. Keys must start with "
+                    "a letter or underscore and hold only letters, digits, '-', '_' "
+                    "and '.'. Put ids in values -- a list of objects -- not in keys."
+                )
+            _bridge_safe(value, f"{where}/{key}")
+        return payload
+    if isinstance(payload, (list, tuple)):
+        for index, item in enumerate(payload):
+            _bridge_safe(item, f"{where}[{index}]")
+        return payload
+    if payload is not None and not isinstance(payload, _BRIDGE_TYPES):
+        raise ValueError(
+            f"{where}: a {type(payload).__name__} does not cross the Indigo action "
+            "bridge. Use None, a bool, a number, a string, a list or a dict."
+        )
+    return payload
+
+
+def _device_name(dev_id) -> str:
+    """The device's name for display, or ``""`` if it cannot be read now.
+
+    A label and only a label. The level beside it is the zone's decision and
+    does not depend on this resolving, so ``""`` means "could not be named"
+    and makes no claim about whether the device exists -- the zone's own
+    explain line is where a light that would not resolve is reported.
+    """
+    try:
+        device = device_lookup.get_device(dev_id)
+    except (device_lookup.DeviceGone, device_lookup.LookupFailed):
+        return ""
+    return str(getattr(device, "name", "") or "")
 
 
 class Plugin(indigo.PluginBase):
@@ -443,20 +514,24 @@ class Plugin(indigo.PluginBase):
             try:
                 document = json.loads(raw)
             except ValueError as exc:
-                return {"ok": False, "path": "", "message": f"not valid JSON: {exc}"}
+                return _bridge_safe(
+                    {"ok": False, "path": "", "message": f"not valid JSON: {exc}"}
+                )
         else:
             # Already parsed -- an in-process caller handing over the dict.
             document = raw
 
         if is_starter_document(document):
-            return {"ok": True, "zones": [], "enabled": []}
+            return _bridge_safe({"ok": True, "zones": [], "enabled": []})
 
         try:
             config = load_config(
                 document, self.sun or IndigoSun(logger=self.logger), dt.date.today()
             )
         except ConfigError as exc:
-            return {"ok": False, "path": exc.path or "", "message": exc.message}
+            return _bridge_safe(
+                {"ok": False, "path": exc.path or "", "message": exc.message}
+            )
         except Exception as exc:
             # The loader raised something that is not a ConfigError, which
             # means the document reached a check that was not expecting its
@@ -468,7 +543,7 @@ class Plugin(indigo.PluginBase):
                 "a ConfigError; the document was refused and the traceback above is "
                 "a bug in the loader, not in the document"
             )
-            return {
+            return _bridge_safe({
                 "ok": False,
                 "path": "",
                 "message": (
@@ -476,13 +551,13 @@ class Plugin(indigo.PluginBase):
                     "Lamplighter rather than a rule the document broke; the plugin log "
                     "has the traceback."
                 ),
-            }
+            })
 
-        return {
+        return _bridge_safe({
             "ok": True,
             "zones": [zone.name for zone in config.zones],
             "enabled": [zone.name for zone in config.zones if zone.enabled],
-        }
+        })
 
     def explain_zone(self, action, dev=None, caller_waiting_for_result=None):
         """Why one zone is doing what it is doing, or would at another time.
@@ -503,7 +578,7 @@ class Plugin(indigo.PluginBase):
                 "startup error in the event log."
             )
             self.logger.warning(f"Lamplighter: {message}")
-            return {"ok": False, "message": message}
+            return _bridge_safe({"ok": False, "message": message})
 
         # `zone_name`, the same prop every zone-taking action reads. It is
         # not routed through _action_zone: that logs the complaint and
@@ -518,7 +593,7 @@ class Plugin(indigo.PluginBase):
                 ", ".join(sorted(self.engine.zones)) or "none"
             )
             self.logger.warning(f"Lamplighter: {message}")
-            return {"ok": False, "message": message}
+            return _bridge_safe({"ok": False, "message": message})
 
         raw_at = str(action.props.get("at", "") or "").strip()
         if raw_at:
@@ -530,7 +605,7 @@ class Plugin(indigo.PluginBase):
                     "YYYY-MM-DDTHH:MM in local time, or leave it blank for now"
                 )
                 self.logger.warning(f"Lamplighter: {message}")
-                return {"ok": False, "message": message}
+                return _bridge_safe({"ok": False, "message": message})
             run = zone.dry_run(at)
             text, levels = run.text, run.levels
         else:
@@ -539,16 +614,26 @@ class Plugin(indigo.PluginBase):
             levels = zone.desired_levels(at)
 
         self.logger.info(text)
-        return {
+        return _bridge_safe({
             "ok": True,
             "zone": zone.name,
             "at": at.strftime("%Y-%m-%dT%H:%M:%S"),
             "explain": text,
-            # Keys as strings: an Indigo device id is an int, but a dict
-            # crossing the executeAction bridge is safest with string keys,
-            # and it is the shape the configuration file writes levels in.
-            "desired": {str(light): levels[light] for light in sorted(levels)},
-        }
+            # A LIST of objects, not a map keyed by device id. Indigo
+            # serialises the return value as XML, so a key of "459564566"
+            # is an illegal tag name -- the shape this originally shipped
+            # with, and it failed on jarvis with LowLevelBadParameterError,
+            # naming neither the key nor the action. Ids are values here,
+            # and _bridge_safe holds that line for every future edit.
+            "desired": [
+                {
+                    "device": light,
+                    "name": _device_name(light),
+                    "level": levels[light],
+                }
+                for light in sorted(levels)
+            ],
+        })
 
     def _action_zone(self, action, allow_all=False):
         """The zone an action names. ``None`` means all; ``False`` means stop.

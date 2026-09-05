@@ -1021,13 +1021,10 @@ def test_validate_config_returns_only_values_that_cross_the_action_bridge(instal
     executeAction caller as nothing at all."""
     the_plugin = started(a_document())
 
-    result = the_plugin.validate_config(an_action(config_json=json.dumps(a_document())))
-
-    for key, value in result.items():
-        assert isinstance(key, str)
-        assert isinstance(value, (str, int, bool, list)), key
-        if isinstance(value, list):
-            assert all(isinstance(item, str) for item in value), key
+    for document in (a_document(), a_document(hallway(hold_seconds=-1))):
+        result = the_plugin.validate_config(an_action(config_json=json.dumps(document)))
+        plugin_module._bridge_safe(result)
+        assert all(isinstance(value, (str, bool, list)) for value in result.values())
 
 
 # --------------------------------------------------------------- explain_zone
@@ -1048,7 +1045,9 @@ def test_explain_zone_with_no_time_answers_what_the_device_says(install, caplog)
     assert result["zone"] == "Hallway"
     assert result["explain"].startswith(published)
     assert "Desired now: 201=off." in result["explain"]
-    assert result["desired"] == {"201": "off"}
+    assert result["desired"] == [
+        {"device": 201, "name": "Hallway Light", "level": "off"}
+    ]
     assert any(r.message == result["explain"] for r in caplog.records)
 
 
@@ -1070,11 +1069,13 @@ def test_explain_zone_dry_runs_the_moment_it_was_asked_about(install):
 
     assert evening["at"] == "2026-09-04T22:00:00"
     assert "Evening" in evening["explain"] and "would be occupied" in evening["explain"]
-    assert evening["desired"] == {"201": 20}
+    assert evening["desired"] == [{"device": 201, "name": "Hallway Light", "level": 20}]
 
     assert daytime["at"] == "2026-09-05T12:00:00"
     assert "Daytime" in daytime["explain"] and "would be vacant" in daytime["explain"]
-    assert daytime["desired"] == {"201": "off"}
+    assert daytime["desired"] == [
+        {"device": 201, "name": "Hallway Light", "level": "off"}
+    ]
 
 
 def test_explain_zone_changes_nothing_about_the_zone_it_is_asked_about(install):
@@ -1128,16 +1129,129 @@ def test_explain_zone_says_so_when_the_time_it_was_given_is_not_a_time(install, 
     assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
-def test_explain_zone_returns_only_values_that_cross_the_action_bridge(install):
-    """Kills: returning the DryRun, the Period or int-keyed levels, none of
-    which survive the executeAction bridge."""
+def test_explain_zone_keys_its_levels_by_word_not_by_device_id(install):
+    """The shape the live bridge rejected.
+
+    Indigo serialises the return value as XML, so the first version of this
+    -- `{"459564566": 60}` -- died on jarvis with LowLevelBadParameterError
+    and gave the caller nothing. The device id has to be a value.
+
+    Kills: going back to a map keyed by device id, in any form.
+    """
     the_plugin = started(a_document())
 
     result = the_plugin.explain_zone(an_action(zone_name="Hallway", at="2026-09-04T22:00"))
 
-    assert isinstance(result["desired"], dict)
-    for key, value in result["desired"].items():
-        assert isinstance(key, str)
-        assert isinstance(value, (str, int))
-    for key in ("ok", "zone", "at", "explain"):
-        assert isinstance(result[key], (str, bool)), key
+    assert isinstance(result["desired"], list)
+    assert result["desired"] == [
+        {"device": 201, "name": "Hallway Light", "level": "off"}
+    ]
+    plugin_module._bridge_safe(result)
+
+
+def test_explain_zone_still_answers_when_a_light_cannot_be_named(install):
+    """The name is a label, and a label that will not resolve must not take
+    the answer down with it.
+
+    Kills: letting DeviceGone out of the name lookup, which would turn "one
+    bulb was deleted" into "this zone cannot be explained at all".
+    """
+    the_plugin = started(a_document())
+    del indigo.devices[201]
+
+    result = the_plugin.explain_zone(an_action(zone_name="Hallway", at="2026-09-04T22:00"))
+
+    assert result["ok"] is True
+    assert result["desired"] == [{"device": 201, "name": "", "level": "off"}]
+
+
+# ----------------------------------------------------------- the bridge guard
+#
+# Indigo serialises an action's return value as XML, so every dict key in a
+# payload becomes a tag name. The fake `indigo` in conftest hands the dict
+# straight back without serialising it, which means this whole class of bug is
+# invisible to every other test in this file -- it shipped once, and the first
+# anyone knew was `LowLevelBadParameterError -- illegal XML tag name
+# character` on jarvis, naming neither the key nor the action.
+#
+# `_bridge_safe` is the check that closes that gap, so these are the tests
+# that have to hold: not "does the payload look right" but "would Indigo
+# accept it".
+
+
+def test_the_bridge_guard_rejects_a_device_id_used_as_a_key():
+    """The exact payload that failed on the server.
+
+    Kills: dropping the guard, or narrowing it to a type check. A numeric
+    string is a perfectly good dict key in Python and a perfectly good JSON
+    key; it is only illegal as an XML tag name, which is why nothing short of
+    this catches it before deployment.
+    """
+    with pytest.raises(ValueError, match="459564566"):
+        plugin_module._bridge_safe({"ok": True, "desired": {"459564566": 60}})
+
+
+def test_the_bridge_guard_names_where_the_bad_key_was():
+    """A payload has a dozen keys; "one of them is wrong" is not a fix.
+
+    Kills: raising without the path, which reproduces exactly the unhelpful
+    message the live failure gave.
+    """
+    with pytest.raises(ValueError, match=r"the return value/desired\[0\]: '2-x'"):
+        plugin_module._bridge_safe({"desired": [{"2-x": 1}]})
+
+
+@pytest.mark.parametrize(
+    "key", ["459564566", "", "2fa", "-lead", ".dot", "has space", "a:b", "a/b", "£"]
+)
+def test_the_bridge_guard_rejects_every_key_that_is_not_an_xml_name(key):
+    with pytest.raises(ValueError):
+        plugin_module._bridge_safe({key: 1})
+
+
+@pytest.mark.parametrize("key", ["ok", "_private", "zone_name", "a-b", "a.b", "x1"])
+def test_the_bridge_guard_allows_a_word_key(key):
+    assert plugin_module._bridge_safe({key: 1}) == {key: 1}
+
+
+def test_the_bridge_guard_recurses_through_lists_and_dicts():
+    """Kills: checking only the top level. The payload that broke had its bad
+    key two levels down, inside the value of a perfectly legal "desired"."""
+    with pytest.raises(ValueError, match="201"):
+        plugin_module._bridge_safe({"desired": [{"level": {"201": 60}}]})
+
+
+def test_the_bridge_guard_rejects_a_value_that_cannot_be_serialised():
+    """The other half of the same failure: a key can be legal and the value
+    still be something Indigo cannot put in the document.
+
+    Kills: returning a DryRun, a Period, a datetime or a set.
+    """
+    with pytest.raises(ValueError, match="datetime"):
+        plugin_module._bridge_safe({"at": dt.datetime(2026, 9, 4, 22, 0)})
+
+
+def test_the_bridge_guard_passes_a_payload_through_unchanged():
+    """It guards; it does not rewrite. Kills: a guard that silently coerces,
+    which would hide the bug rather than report it."""
+    payload = {"ok": True, "desired": [{"device": 201, "name": "Hall", "level": 60}]}
+
+    assert plugin_module._bridge_safe(payload) is payload
+
+
+def test_every_action_return_goes_through_the_bridge_guard(install):
+    """The guard is worthless if a return forgets it.
+
+    Kills: adding a third action, or a new early return, that answers with a
+    raw dict -- which is how the first one got to jarvis.
+    """
+    source = open(
+        os.path.join(SERVER_PLUGIN, "plugin.py"), encoding="utf-8"
+    ).read()
+    returns = [
+        line.strip()
+        for line in source.splitlines()
+        if line.strip().startswith("return {")
+    ]
+
+    assert returns == [], f"these returns bypass _bridge_safe: {returns}"
