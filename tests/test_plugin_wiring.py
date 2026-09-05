@@ -856,3 +856,288 @@ def test_device_start_comm_refreshes_the_state_list(install):
     the_plugin.deviceStartComm(dev)
 
     assert dev.state_list_refreshed == before + 1
+
+
+# ------------------------------------------- the actions that answer a caller
+#
+# validate_config and explain_zone exist for the `lamplighter_*` MCP tools in
+# indigo-mcp-lite, which is stdlib-only and in another process: it cannot
+# import this loader, so it asks the running plugin instead. What these pin is
+# the half that is invisible from inside Indigo -- that the answer comes back
+# as a value at all, that a bad document is a value and not a traceback, and
+# that asking a zone what it is doing does not make it do anything.
+
+EXAMPLE_CONFIG = os.path.join(
+    os.path.dirname(__file__), os.pardir, "examples", "lamplighter.example.json"
+)
+
+
+class FatalCommander:
+    """A commander whose every use is a test failure.
+
+    "Nothing was written" cannot be read off a return value, so it is made
+    fatal instead: hand this to the engine and any write at all raises where
+    the test can see it, rather than showing up as a light that moved.
+    """
+
+    def __getattr__(self, name):
+        raise AssertionError(f"a write reached the commander ({name})")
+
+
+def no_writes(the_plugin):
+    """Make any write from now on fatal, on both paths that hold a commander."""
+    the_plugin.engine.commander = FatalCommander()
+    the_plugin.engine.reconciler.commander = FatalCommander()
+    return the_plugin
+
+
+def two_period_hallway():
+    """A Hallway with two bands, so "which period" has a wrong answer."""
+    return make_zone_document(
+        "Hallway",
+        periods=[
+            make_period("Daytime", "06:00", "20:00", levels={"201": 100}),
+            make_period("Evening", "20:00", "06:00", levels={"201": 20}),
+        ],
+        presence_devices=[101],
+        lights=[201],
+        lux=None,
+    )
+
+
+# ------------------------------------------------------------ validate_config
+
+
+def test_validate_config_accepts_the_shipped_example(install):
+    """The example is what an author copies from and what the MCP tools are
+    written against. Kills: a validator that answers "ok" by never looking,
+    and a shipped example that no longer loads."""
+    the_plugin = started(a_document())
+    with open(EXAMPLE_CONFIG, encoding="utf-8") as handle:
+        text = handle.read()
+
+    result = the_plugin.validate_config(an_action(config_json=text))
+
+    assert result == {
+        "ok": True,
+        "zones": ["Kitchen", "Hallway"],
+        "enabled": ["Kitchen", "Hallway"],
+    }
+
+
+def test_validate_config_names_the_disabled_zones_separately(install):
+    """Kills: reporting `zones` twice. "Which zones does this file define" and
+    "which of them would run" are different questions, and an author who has
+    just disabled one needs to see that it took."""
+    the_plugin = started(a_document())
+    document = a_document(hallway("Hallway"), hallway("Study", enabled=False))
+
+    result = the_plugin.validate_config(an_action(config_json=json.dumps(document)))
+
+    assert result["zones"] == ["Hallway", "Study"]
+    assert result["enabled"] == ["Hallway"]
+
+
+def test_validate_config_hands_back_the_path_of_the_value_that_is_wrong(install):
+    """The path is the whole point (R15): "invalid" sends an author reading a
+    300-line file by eye, `zones/0/hold_seconds` sends them to the value.
+
+    Kills: flattening ConfigError into str(exc), which loses the field.
+    """
+    the_plugin = started(a_document())
+    document = a_document(hallway(hold_seconds=-1))
+
+    result = the_plugin.validate_config(an_action(config_json=json.dumps(document)))
+
+    assert result["ok"] is False
+    assert result["path"] == "zones/0/hold_seconds"
+    assert "-1" in result["message"]
+
+
+def test_validate_config_reports_unparseable_json_as_a_result_not_an_exception(install):
+    """A half-typed document is the common case for a caller validating an
+    edit, so it must come back as a value the author can be shown.
+
+    Kills: letting json.JSONDecodeError out, which Indigo turns into a
+    traceback in the log and a bare None at the caller.
+    """
+    the_plugin = started(a_document())
+
+    result = the_plugin.validate_config(an_action(config_json='{"version": 1, "zones":'))
+
+    assert result["ok"] is False
+    assert result["path"] == ""
+    assert "not valid JSON" in result["message"]
+
+
+def test_validate_config_accepts_the_empty_starter_shape(install):
+    """`{"version": 1, "zones": []}` is what a fresh install is given, and the
+    plugin runs on it. The loader refuses it, because a *configured* file must
+    not have an empty zone list.
+
+    Kills: validating by calling load_config alone, which tells a brand new
+    user that the file the plugin just wrote for them is broken.
+    """
+    the_plugin = started(a_document())
+
+    result = the_plugin.validate_config(
+        an_action(config_json=json.dumps(plugin_module.DEFAULT_DOCUMENT))
+    )
+
+    assert result == {"ok": True, "zones": [], "enabled": []}
+
+
+def test_validate_config_works_before_the_plugin_has_a_sun(install):
+    """A caller can validate against a plugin whose startup has not finished.
+
+    Kills: `load_config(document, self.sun, ...)` with self.sun still None,
+    which raises AttributeError out of the callback the first time an MCP
+    tool is used after a restart.
+    """
+    the_plugin = make_plugin()
+    assert the_plugin.sun is None
+
+    result = the_plugin.validate_config(
+        an_action(config_json=json.dumps(a_document(hallway())))
+    )
+
+    assert result == {"ok": True, "zones": ["Hallway"], "enabled": ["Hallway"]}
+
+
+def test_validate_config_raises_only_when_the_caller_sent_nothing(install):
+    """The one thing that IS an exception: there is no document.
+
+    Kills: answering `{"ok": false}` for a missing prop, which reports the
+    author's file as broken when the file was never sent.
+    """
+    the_plugin = started(a_document())
+
+    with pytest.raises(ValueError, match="config_json"):
+        the_plugin.validate_config(an_action())
+
+
+def test_validate_config_returns_only_values_that_cross_the_action_bridge(install):
+    """Kills: returning the Config object, or ZoneConfigs, which arrive at an
+    executeAction caller as nothing at all."""
+    the_plugin = started(a_document())
+
+    result = the_plugin.validate_config(an_action(config_json=json.dumps(a_document())))
+
+    for key, value in result.items():
+        assert isinstance(key, str)
+        assert isinstance(value, (str, int, bool, list)), key
+        if isinstance(value, list):
+            assert all(isinstance(item, str) for item in value), key
+
+
+# --------------------------------------------------------------- explain_zone
+
+
+def test_explain_zone_with_no_time_answers_what_the_device_says(install, caplog):
+    """The action and the zone device must not be able to disagree: one line,
+    one source. Kills: composing a second explain line in the plugin."""
+    the_plugin = started(a_document())
+    the_plugin.engine.tick(dt.datetime.now())
+    published = device_for("Hallway").states["explain"]
+    assert "Hallway is vacant" in published
+
+    with caplog.at_level(logging.INFO):
+        result = the_plugin.explain_zone(an_action(zone_name="Hallway"))
+
+    assert result["ok"] is True
+    assert result["zone"] == "Hallway"
+    assert result["explain"].startswith(published)
+    assert "Desired now: 201=off." in result["explain"]
+    assert result["desired"] == {"201": "off"}
+    assert any(r.message == result["explain"] for r in caplog.records)
+
+
+def test_explain_zone_dry_runs_the_moment_it_was_asked_about(install):
+    """The question an author asks before saving a period edit.
+
+    Kills: ignoring `at` and explaining now. Both halves catch it -- the
+    reported instant, and the answer itself, which differs between the two
+    bands because the presence hold has run out by the later one.
+    """
+    the_plugin = started(a_document(two_period_hallway()))
+    zone = the_plugin.engine.zones["Hallway"]
+    # The room was last seen a minute before the evening instant, so the
+    # five-minute hold is still running there and long gone by the next day.
+    zone.ingest_presence(101, True, dt.datetime(2026, 9, 4, 21, 59))
+
+    evening = the_plugin.explain_zone(an_action(zone_name="Hallway", at="2026-09-04T22:00"))
+    daytime = the_plugin.explain_zone(an_action(zone_name="Hallway", at="2026-09-05T12:00"))
+
+    assert evening["at"] == "2026-09-04T22:00:00"
+    assert "Evening" in evening["explain"] and "would be occupied" in evening["explain"]
+    assert evening["desired"] == {"201": 20}
+
+    assert daytime["at"] == "2026-09-05T12:00:00"
+    assert "Daytime" in daytime["explain"] and "would be vacant" in daytime["explain"]
+    assert daytime["desired"] == {"201": "off"}
+
+
+def test_explain_zone_changes_nothing_about_the_zone_it_is_asked_about(install):
+    """Asking must not be doing. Kills: a dry run built on `evaluate()`, which
+    moves the state machine -- and reconcile writes from what it decides, so
+    a question about midnight turns the lights off now."""
+    the_plugin = no_writes(started(a_document(two_period_hallway())))
+    zone = the_plugin.engine.zones["Hallway"]
+    zone.ingest_presence(101, True, dt.datetime(2026, 9, 4, 21, 59))
+    before = (zone.state, zone.evaluations_today, zone.writes_today, zone.last_trigger)
+    light = indigo.devices[201].states.copy()
+    dirty = the_plugin.engine.dirty
+
+    the_plugin.explain_zone(an_action(zone_name="Hallway"))
+    the_plugin.explain_zone(an_action(zone_name="Hallway", at="2026-09-04T22:00"))
+
+    assert (zone.state, zone.evaluations_today, zone.writes_today, zone.last_trigger) == before
+    assert indigo.devices[201].states == light
+    assert the_plugin.engine.dirty == dirty
+
+
+def test_explain_zone_naming_a_zone_that_is_gone_says_so_and_lists_the_real_ones(
+    install, caplog
+):
+    """Kills: raising KeyError. Indigo's action layer turns that into a
+    traceback with no hint that the name is simply stale, and the caller that
+    was waiting for a result gets None."""
+    the_plugin = started(a_document(hallway("Hallway"), hallway("Study", presence_devices=[102])))
+
+    with caplog.at_level(logging.WARNING):
+        result = the_plugin.explain_zone(an_action(zone_name="Kitchen"))
+
+    assert result["ok"] is False
+    assert "no zone named 'Kitchen'" in result["message"]
+    assert "Hallway, Study" in result["message"]
+    assert any(
+        r.levelno == logging.WARNING and "Kitchen" in r.message for r in caplog.records
+    )
+
+
+def test_explain_zone_says_so_when_the_time_it_was_given_is_not_a_time(install, caplog):
+    """Kills: letting ValueError out of fromisoformat, which is a traceback
+    rather than an answer naming the format the field wants."""
+    the_plugin = started(a_document())
+
+    with caplog.at_level(logging.WARNING):
+        result = the_plugin.explain_zone(an_action(zone_name="Hallway", at="tomorrow evening"))
+
+    assert result["ok"] is False
+    assert "YYYY-MM-DDTHH:MM" in result["message"]
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_explain_zone_returns_only_values_that_cross_the_action_bridge(install):
+    """Kills: returning the DryRun, the Period or int-keyed levels, none of
+    which survive the executeAction bridge."""
+    the_plugin = started(a_document())
+
+    result = the_plugin.explain_zone(an_action(zone_name="Hallway", at="2026-09-04T22:00"))
+
+    assert isinstance(result["desired"], dict)
+    for key, value in result["desired"].items():
+        assert isinstance(key, str)
+        assert isinstance(value, (str, int))
+    for key in ("ok", "zone", "at", "explain"):
+        assert isinstance(result[key], (str, bool)), key

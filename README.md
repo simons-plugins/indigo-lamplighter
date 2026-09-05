@@ -7,9 +7,8 @@ person has taken over), never from diffing live device state.
 
 Successor to the `indigo-auto-lights` fork. Design: [`docs/plans/PRD-indigo-lamplighter.md`](docs/plans/PRD-indigo-lamplighter.md).
 
-Status: M2 — engine plus the Indigo plugin bundle: zone and controller
-devices, actions, menu items, config load/reload/persist and logging. No web
-page yet.
+Status: M2 live on the Hallway zone on jarvis (2026-09-05); M3 (converter
+done, MCP tools in progress).
 
 ## Install
 

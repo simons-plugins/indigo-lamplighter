@@ -138,6 +138,25 @@ class Lux:
         that gap is the whole trigger, and it is one-sided on purpose: the
         band is there to stop the zone's own lights ending the dark, not to
         delay the dark starting.
+
+        Asking **moves** the trigger: the verdict it reaches becomes the one
+        the next call holds against. A caller that only wants to report the
+        verdict, rather than reach it, wants :meth:`would_be_dark`.
+        """
+        previous = self._dark
+        verdict = self.would_be_dark(dark_below, hysteresis, when_unreadable)
+        self.changed = previous is not None and verdict != previous
+        self._dark = verdict
+        return verdict
+
+    def would_be_dark(self, dark_below, hysteresis=0.0, when_unreadable="dark") -> bool:
+        """The verdict this reading reaches, without moving the trigger.
+
+        The same arithmetic :meth:`dark` runs, asked rather than applied.
+        It exists because the trigger's memory *is* state: a dry run that
+        called :meth:`dark` to find out what a zone would be doing at 22:00
+        would leave the band held against a verdict no evaluation ever made,
+        and the next real reading would land on the wrong side of it.
         """
         previous = self._dark
 
@@ -159,8 +178,6 @@ class Lux:
             # dark -- the band never creates a dark the threshold did not.
             verdict = previous if previous is not None else False
 
-        self.changed = previous is not None and verdict != previous
-        self._dark = verdict
         return verdict
 
 

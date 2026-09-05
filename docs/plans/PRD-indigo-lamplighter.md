@@ -302,6 +302,27 @@ Actions: reset override (zone/all), **lock zone** (create an override without a
 device change: the thing scripts wanted in the fork), set zone enabled,
 reconcile now. Menu: print zone states, dump explain for all zones.
 
+Two more actions exist for a caller that is not a person, and both **return**
+their answer rather than only logging it (an `executeAction(...,
+waitUntilDone=True)` caller reads the value):
+
+- **`validate_config`** (hidden) — the single validation path. Takes the whole
+  document as JSON, runs it through `config.load_config` and nothing else, and
+  answers `{ok, zones, enabled}` or `{ok: false, path, message}` with the JSON
+  pointer to the value that is wrong. A bad document is a *result*, never an
+  exception. It exists because the `lamplighter_*` MCP tools live in
+  indigo-mcp-lite, which is stdlib-only and in another process: it cannot
+  import the loader, and a second implementation of "is this valid" is a
+  second opinion.
+- **`explain_zone`** (visible, so an action group can log it) — one zone's
+  reasoning. With no time, the live explain line plus the current plan; with
+  an optional local `at` (`YYYY-MM-DDTHH:MM`), a **dry run** at that instant:
+  which period covers it, what state the machine would be in, and what each
+  light would be told, resolved from the inputs the zone holds now. Side
+  effect free by construction, which is the hard part — the Schmitt trigger
+  advances when read and `_age_override` releases locks when aged, so the dry
+  run uses read-only twins of both (R9, R10).
+
 ## 6. Migration
 
 1. Install Lamplighter alongside the fork. Both enabled; no zone configured

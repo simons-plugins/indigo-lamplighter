@@ -127,6 +127,26 @@ class LightSet:
         return tuple(self.gone) + tuple(self.failed)
 
 
+@dataclass(frozen=True)
+class DryRun:
+    """What a zone WOULD do at an instant, worked out without touching it.
+
+    The answer to "why will the Kitchen be at 10% at midnight", asked before
+    midnight. Every field comes from :meth:`Zone.dry_run`, which reads the
+    inputs the zone holds *now* and resolves the period, the state machine
+    and the level table against ``at`` -- so this describes a decision the
+    zone has not taken and, unless the inputs move, will take.
+
+    It is deliberately not a :class:`Transition`: nothing transitioned.
+    """
+
+    at: dt.datetime
+    state: ZoneState
+    period: str | None
+    levels: dict
+    text: str
+
+
 class Zone:
     """One lighting zone: inputs, state machine, desired levels, counters."""
 
@@ -336,6 +356,20 @@ class Zone:
             self.dark_below(), self.config.lux.hysteresis, self.config.lux.when_unreadable
         )
 
+    def would_be_dark(self) -> bool:
+        """The daylight verdict, reached without moving the Schmitt trigger.
+
+        :meth:`is_dark` is what the state machine calls, and calling it is
+        what advances the hysteresis band. This is the same question asked by
+        a reporter -- :meth:`dry_run` -- which must not change what the next
+        real evaluation decides.
+        """
+        if self.config.lux is None:
+            return True
+        return self.lux.would_be_dark(
+            self.dark_below(), self.config.lux.hysteresis, self.config.lux.when_unreadable
+        )
+
     def resolve_lights(self, now=None) -> LightSet:
         """Look up this zone's lights, warning once for each that will not resolve.
 
@@ -470,6 +504,24 @@ class Zone:
         expiry = self.presence.expiry(self.config.hold_seconds)
         return expiry is not None and expiry > self.override.since
 
+    def override_holds_at(self, at: dt.datetime, presence_active: bool) -> bool:
+        """Would the override still be in force at ``at``? Asks; never ages.
+
+        The three edges :meth:`_age_override` acts on -- unlock-on-leave, the
+        expiry, and the extension -- read rather than applied, so that
+        :meth:`dry_run` can answer "what will this zone be doing at 22:00"
+        without releasing a lock the person who owns the house is still
+        holding. The two must agree; ``test_zone`` pins them together.
+        """
+        override = self.override
+        if override is None:
+            return False
+        if self._released_by_leaving(at, presence_active):
+            return False
+        if at < override.expires_at:
+            return True
+        return bool(presence_active and override.extend_minutes > 0)
+
     # ------------------------------------------------------ the state machine
 
     def evaluate(self, now: dt.datetime, cause: str):
@@ -493,22 +545,7 @@ class Zone:
         self._age_override(now, presence_active)
 
         off_duty = self._off_duty_reason(period, dark)
-        if off_duty is not None and not (
-            off_duty == OFF_DUTY_BRIGHT and self.override is not None
-        ):
-            # An override outlasts the room going bright, and only that: a
-            # person who took the lights over keeps them until the override
-            # ends, daylight or not. It does not outlast being switched off
-            # or the period ending, because those two write nothing either
-            # way and reporting a disabled zone as OVERRIDDEN would lie about
-            # what it is doing.
-            new_state = ZoneState.OFF_DUTY
-        elif self.override is not None:
-            new_state = ZoneState.OVERRIDDEN
-        elif presence_active:
-            new_state = ZoneState.OCCUPIED
-        else:
-            new_state = ZoneState.VACANT
+        new_state = self._state_for(off_duty, self.override is not None, presence_active)
 
         self._evaluated_at = now
         self._period = period
@@ -533,6 +570,27 @@ class Zone:
             cause=cause,
             inputs=inputs,
         )
+
+    def _state_for(self, off_duty, overridden, presence_active) -> ZoneState:
+        """Which state these three facts put the zone in (section 5.3).
+
+        Pure, and separate from :meth:`evaluate`, so that :meth:`dry_run` can
+        ask the state machine the question without running it. Two copies of
+        this ranking would be two state machines.
+        """
+        if off_duty is not None and not (off_duty == OFF_DUTY_BRIGHT and overridden):
+            # An override outlasts the room going bright, and only that: a
+            # person who took the lights over keeps them until the override
+            # ends, daylight or not. It does not outlast being switched off
+            # or the period ending, because those two write nothing either
+            # way and reporting a disabled zone as OVERRIDDEN would lie about
+            # what it is doing.
+            return ZoneState.OFF_DUTY
+        if overridden:
+            return ZoneState.OVERRIDDEN
+        if presence_active:
+            return ZoneState.OCCUPIED
+        return ZoneState.VACANT
 
     def _off_duty_reason(self, period, dark):
         """Why the zone would be off duty, or None if it would not be.
@@ -589,28 +647,41 @@ class Zone:
         written in any state, not on, not off, not at the reconcile tick --
         and it is why the guarantee is one line here rather than a special
         case in the writer.
+
+        The table itself is :meth:`_plan_for`, one line down, parameterised
+        by the state rather than reading ``self.state``: that is what lets
+        :meth:`dry_run` ask the same question about a state the zone is not
+        in, without a second copy of the table to keep in step.
+        """
+        return self._plan_for(self.state, self._off_duty, self.active_period(now))
+
+    def _plan_for(self, state, off_duty, period) -> dict:
+        """The level table of :meth:`desired_levels`, for any state.
+
+        Read the docstring above this one: everything it promises is decided
+        here. ``state`` and ``off_duty`` are passed rather than read so that
+        the live plan and a dry run's plan cannot drift apart.
         """
         plan = {light: LEAVE for light in self.config.lights}
-        period = self.active_period(now)
 
-        if self.state is ZoneState.OVERRIDDEN:
+        if state is ZoneState.OVERRIDDEN:
             # A person has taken over: desired is whatever the devices are.
             return plan
         if period is None:
             return plan
 
-        if self.state is ZoneState.OFF_DUTY:
+        if state is ZoneState.OFF_DUTY:
             # Which off duty? `bright` is VACANT's plan: the daylight has made
             # the lights unnecessary and this house relies on them going off
             # when a room brightens, whether or not anybody is standing in it.
             # `no_period` and `disabled` write nothing -- the plugin has no
             # opinion about a time it was not configured for, or about a zone
             # it was told to leave alone.
-            if self._off_duty == OFF_DUTY_BRIGHT:
+            if off_duty == OFF_DUTY_BRIGHT:
                 return self._all_off(period, plan)
             return plan
 
-        if self.state is ZoneState.VACANT:
+        if state is ZoneState.VACANT:
             return self._all_off(period, plan)
 
         # OCCUPIED.
@@ -693,9 +764,23 @@ class Zone:
         event log, so it says the degradations out loud: an unreadable sensor
         and a stale reading are named here, never rounded off into a number
         that looks like a working sensor (R15).
+
+        It reports the LAST evaluation, not a fresh one -- asking again could
+        answer differently and the line would then describe a decision the
+        zone never took. For "what would it decide at 22:00", ask
+        :meth:`dry_run`.
         """
-        period = self._period
-        if self.state is ZoneState.OFF_DUTY:
+        why = self._why(self.state, self._off_duty, self._presence_active)
+        parts = self._input_parts(now, self._period, self._presence_active, self._dark)
+        return (
+            f"{self.name} is {self.state.value} because {why}. "
+            + "; ".join(parts)
+            + f". Last trigger: {self.last_trigger or 'none'}."
+        )
+
+    def _why(self, state, off_duty, presence_active) -> str:
+        """The reason half of an explain line, for any state (R14)."""
+        if state is ZoneState.OFF_DUTY:
             # The cause is named as well as described, because it is what
             # decides whether the lights go off or are left alone, and a
             # reader who only sees "off duty" cannot tell which happened.
@@ -705,30 +790,32 @@ class Zone:
                 ),
                 OFF_DUTY_NO_PERIOD: "no period covers this time",
                 OFF_DUTY_BRIGHT: "the room is bright",
-            }.get(self._off_duty, "it has not been evaluated yet")
-            why += f" (off-duty cause: {self._off_duty})"
-        elif self.state is ZoneState.OVERRIDDEN and self.override is not None:
+            }.get(off_duty, "it has not been evaluated yet")
+            return why + f" (off-duty cause: {off_duty})"
+        if state is ZoneState.OVERRIDDEN and self.override is not None:
             why = (
                 f"device {self.override.device_id} took it over at "
                 f"{self.override.since:%H:%M:%S}, held until "
                 f"{self.override.expires_at:%H:%M:%S}"
             )
-            if self._off_duty == OFF_DUTY_BRIGHT:
+            if off_duty == OFF_DUTY_BRIGHT:
                 why += ", and it outlasts the room going bright"
-        elif self._presence_active:
-            why = "someone is here"
-        else:
-            why = "the presence hold has expired"
+            return why
+        if presence_active:
+            return "someone is here"
+        return "the presence hold has expired"
 
+    def _input_parts(self, now, period, presence_active, dark) -> list:
+        """The inputs half of an explain line: one ``key=value`` per input."""
         parts = [
             f"period={period.name if period else 'none'}",
-            f"presence={'active' if self._presence_active else 'inactive'}"
+            f"presence={'active' if presence_active else 'inactive'}"
             + (
                 f" (last seen {self.presence.last_seen:%H:%M:%S})"
                 if self.presence.last_seen
                 else " (never seen)"
             ),
-            f"lux={self._lux_phrase(now)}",
+            f"lux={self._lux_phrase(now, dark)}",
             f"override={self.override.device_id if self.override else 'none'}",
         ]
         if self._unavailable:
@@ -736,16 +823,58 @@ class Zone:
                 "unavailable lights="
                 + "/".join(str(dev_id) for dev_id in self._unavailable)
             )
-        return (
-            f"{self.name} is {self.state.value} because {why}. "
-            + "; ".join(parts)
-            + f". Last trigger: {self.last_trigger or 'none'}."
+        return parts
+
+    def dry_run(self, at: dt.datetime) -> DryRun:
+        """What this zone would decide at ``at``, deciding nothing (5.13).
+
+        The question an author asks before saving a period edit, and the one
+        an MCP caller asks on their behalf: *at midnight, which period is
+        this, what state would the machine be in, and what would each light
+        be told?* The period and the level table are resolved against ``at``;
+        every input -- presence, lux, the override, the enables -- is read as
+        it stands **now**, because that is the only honest answer available:
+        nobody knows whether the room will be occupied at midnight.
+
+        Nothing here writes, evaluates, reconciles or moves a counter. Three
+        of the pieces it needs are hazardous asked the ordinary way and each
+        has a read-only twin: :meth:`would_be_dark` rather than
+        :meth:`is_dark`, which would advance the hysteresis band;
+        :meth:`override_holds_at` rather than ``_age_override``, which would
+        release a live lock; and :meth:`_plan_for` rather than
+        :meth:`desired_levels`, which reads the state the zone is actually
+        in. Getting any of those wrong makes *asking* a question change the
+        answer -- the one failure a dry run must not have.
+        """
+        period = self.active_period(at)
+        presence_active = self.presence.active(at, self.config.hold_seconds)
+        dark = self.would_be_dark()
+        overridden = self.override_holds_at(at, presence_active)
+        off_duty = self._off_duty_reason(period, dark)
+        state = self._state_for(off_duty, overridden, presence_active)
+        levels = self._plan_for(state, off_duty, period)
+
+        text = (
+            f"{self.name} would be {state.value} at {at:%Y-%m-%dT%H:%M} because "
+            f"{self._why(state, off_duty, presence_active)}. "
+            + "; ".join(self._input_parts(at, period, presence_active, dark))
+            + ". Levels there: "
+            + (", ".join(f"{light}={levels[light]}" for light in sorted(levels)) or "none")
+            + ". This is a dry run against the inputs as they stand now: nothing "
+            "was evaluated, nothing was written, and the zone is unchanged."
+        )
+        return DryRun(
+            at=at,
+            state=state,
+            period=period.name if period else None,
+            levels=levels,
+            text=text,
         )
 
-    def _lux_phrase(self, now: dt.datetime) -> str:
+    def _lux_phrase(self, now: dt.datetime, dark: bool) -> str:
         if self.config.lux is None:
             return "no sensor (this zone has no daylight gate)"
-        threshold = f"{'dark' if self._dark else 'bright'} below {self.dark_below():g}"
+        threshold = f"{'dark' if dark else 'bright'} below {self.dark_below():g}"
         if self.lux.unreadable:
             return f"UNREADABLE ({self.lux.reason}), treated as {threshold}"
         if self.lux.value is None:

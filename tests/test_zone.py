@@ -742,3 +742,119 @@ def test_a_zone_with_no_lux_block_is_always_dark_enough():
     zone = make_zone([evening()], lights=[201, 202], lux=None)
     assert zone.is_dark() is True
     assert zone.ingest_lux(50_000, NOW) is False
+
+
+# ------------------------------------------------------------- the dry run
+#
+# `dry_run` answers "what would this zone decide at 22:00" from the inputs it
+# holds now. The whole value of it is that asking does not change the answer,
+# and three of the pieces it needs are hazardous asked the ordinary way: the
+# Schmitt trigger advances when you read it, `_age_override` releases a lock
+# when you age it, and `desired_levels` reads the state the zone is in. These
+# pin the read-only twins to the originals.
+
+
+def test_a_dry_run_does_not_seed_the_schmitt_trigger():
+    """Kills: `would_be_dark()` -> `is_dark()` inside Zone.dry_run.
+
+    `Lux.dark()` writes the verdict it reaches, so a dry run that called it
+    would leave the band held against a verdict no evaluation ever made --
+    and the trigger is one-sided, so the very next reading inside the band
+    would then hold a dark this zone never entered. Asking a question would
+    have changed the answer to the next one.
+    """
+    zone = two_light_zone()  # a lux gate, and nothing read yet
+    assert zone.lux.verdict is None
+
+    zone.dry_run(NOW)
+
+    assert zone.lux.verdict is None, "the dry run moved the trigger"
+
+    # And the consequence, in case the verdict is ever seeded some other way:
+    # 2400 is inside the 2200-2500 band, so with no verdict yet it is not
+    # dark. A seeded True would hold, and the room would be dark all evening.
+    zone.ingest_lux(2400, NOW)
+    zone.evaluate(NOW, "first reading")
+    assert zone.is_dark() is False
+
+
+def test_a_dry_run_neither_evaluates_nor_writes_nor_counts():
+    """Kills: implementing dry_run as `evaluate()` and reading the result.
+
+    That would move the state machine, the counters and the last trigger --
+    and reconcile writes from `desired_levels`, so a zone put into VACANT by
+    somebody *asking* about midnight turns the lights off now.
+    """
+    zone = occupy(two_light_zone())
+    state, evaluations, trigger = zone.state, zone.evaluations_today, zone.last_trigger
+
+    zone.dry_run(dt.datetime(2026, 9, 5, 2, 0))
+
+    assert zone.state is state
+    assert zone.evaluations_today == evaluations
+    assert zone.last_trigger == trigger
+    assert zone._evaluated_at == NOW
+
+
+def test_a_dry_run_resolves_the_period_and_the_levels_at_the_instant_asked():
+    """Kills: resolving the period against `now` and ignoring `at`."""
+    zone = occupy(
+        two_light_zone(
+            periods=[
+                evening(),
+                make_period("Overnight", "23:00", "06:00", levels={"201": 5, "202": 5}),
+            ]
+        )
+    )
+
+    inside_evening = zone.dry_run(NOW)
+    assert inside_evening.period == "Evening"
+    assert inside_evening.levels == {201: 60, 202: 30}
+
+    # Two hours after the presence hold expired, in the next band along.
+    overnight = zone.dry_run(dt.datetime(2026, 9, 4, 23, 30))
+    assert overnight.period == "Overnight"
+    assert overnight.state is ZoneState.VACANT
+    assert overnight.levels == {201: "off", 202: "off"}
+    assert "would be vacant at 2026-09-04T23:30" in overnight.text
+    assert "Overnight" in overnight.text
+
+
+@pytest.mark.parametrize(
+    "when,presence_active,unlock_on_leave,extend_minutes",
+    [
+        (dt.timedelta(minutes=1), True, True, 0),  # inside the hold
+        (dt.timedelta(minutes=61), False, False, 0),  # expired, room empty
+        (dt.timedelta(minutes=61), True, False, 30),  # expired, extends
+        (dt.timedelta(minutes=61), True, False, 0),  # expired, no extension
+        (dt.timedelta(minutes=6), False, True, 0),  # unlock on leave
+        (dt.timedelta(minutes=6), False, False, 0),  # unlock on leave, off
+    ],
+)
+def test_asking_whether_an_override_holds_agrees_with_ageing_it(
+    when, presence_active, unlock_on_leave, extend_minutes
+):
+    """The two must never disagree, or a dry run describes a different zone.
+
+    `override_holds_at` is `_age_override` with the writes taken out, so it
+    is pinned against the real thing rather than against a table of expected
+    answers: a table would have to be re-derived every time R10 moves, and
+    the failure mode is silent.
+
+    Kills: any edge of `_age_override` that `override_holds_at` gets wrong --
+    the unlock-on-leave release, the expiry, or the extension.
+    """
+    override = {
+        "unlock_on_leave": unlock_on_leave,
+        "duration_minutes": 60,
+        "extend_minutes": extend_minutes,
+    }
+    asked, aged = (occupy(two_light_zone(override=override)) for _ in range(2))
+    for zone in (asked, aged):
+        zone.start_override(201, NOW)
+
+    answer = asked.override_holds_at(NOW + when, presence_active)
+    aged._age_override(NOW + when, presence_active)
+
+    assert answer is (aged.override is not None)
+    assert asked.override is not None, "asking released the lock"

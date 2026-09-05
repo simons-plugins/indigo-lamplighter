@@ -51,4 +51,48 @@
         <Name>Reconcile Now</Name>
         <CallbackMethod>reconcile_now</CallbackMethod>
     </Action>
+
+    <!-- The two actions below RETURN a value. A caller reaches it with
+         executeAction(..., waitUntilDone=True); called from the UI or from a
+         trigger with no waiting caller, the return is simply dropped and
+         explain_zone's line still lands in the event log. -->
+
+    <!-- Hidden: there is nothing for a person to do with it. It exists so
+         that the lamplighter_* MCP tools in indigo-mcp-lite can check a
+         proposed configuration against the ONE validator (config.load_config)
+         without importing it: lite is stdlib-only and in another process.
+         Props: config_json (the whole document as JSON text).
+         Returns: {ok: true, zones: [...], enabled: [...]}
+               or {ok: false, path: "zones/0/hold_seconds", message: "..."} -->
+    <Action id="validate_config" uiPath="hidden">
+        <Name>Validate Configuration</Name>
+        <CallbackMethod>validate_config</CallbackMethod>
+        <ConfigUI>
+            <Field id="config_json" type="textfield">
+                <Label>Configuration JSON:</Label>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <!-- Visible, unlike its sibling, because pointing an action group at it
+         is how you get a zone's reasoning into the event log without opening
+         a plugin menu. Returns the same text it logs.
+         Props: zone_name, at (optional).
+         Returns: {ok, zone, at, explain, desired: {"201": 60, ...}} -->
+    <Action id="explain_zone">
+        <Name>Explain Zone</Name>
+        <CallbackMethod>explain_zone</CallbackMethod>
+        <ConfigUI>
+            <Field id="zone_name" type="menu">
+                <Label>Zone:</Label>
+                <List class="self" filter="" method="get_zone_list"/>
+            </Field>
+            <Field id="at" type="textfield" defaultValue="">
+                <Label>At:</Label>
+            </Field>
+            <Field id="explain_zone_help" type="label" fontSize="small" alignWithControl="true">
+                <Label>Leave "At" blank to explain the zone as it is right now. Give a local time as YYYY-MM-DDTHH:MM to dry-run it instead: which period covers that moment, what state the zone would be in, and what each light would be told, worked out from the zone's inputs as they stand now. A dry run decides nothing and writes nothing.</Label>
+            </Field>
+        </ConfigUI>
+    </Action>
 </Actions>

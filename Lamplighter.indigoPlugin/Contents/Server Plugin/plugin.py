@@ -91,6 +91,19 @@ def config_path() -> str:
     return os.path.join(config_dir(), CONFIG_FILENAME)
 
 
+def is_starter_document(document) -> bool:
+    """Is this the shape a fresh install is given (and no zones at all)?
+
+    Recognised here, by shape, rather than by reading the loader's error
+    message: ``load_config`` refuses an empty ``zones`` because a
+    *configured* file must not have one, which is a different statement from
+    "this install has not been configured yet". Both ``_read_config`` and the
+    ``validate_config`` action ask this, and they must agree -- one of them
+    telling a new user their starter file is broken is the failure.
+    """
+    return isinstance(document, dict) and document.get("zones") == []
+
+
 class Plugin(indigo.PluginBase):
     """Indigo's half of Lamplighter: callbacks in, device states out."""
 
@@ -382,6 +395,161 @@ class Plugin(indigo.PluginBase):
             "on the next worker pass"
         )
 
+    # --------------------------------------------- the actions with an answer
+    #
+    # These two exist for a caller that is not a person: the `lamplighter_*`
+    # MCP tools in indigo-mcp-lite, which is stdlib-only and in another
+    # process, so it cannot import this loader and must ask the running
+    # plugin instead. Both therefore RETURN rather than log -- the value
+    # reaches a caller that used `executeAction(..., waitUntilDone=True)` --
+    # and both answer in plain dicts of str/int/bool/list, which is what
+    # survives that bridge.
+    #
+    # Neither raises for a bad *document*: a caller validating an edit an LLM
+    # just proposed needs the complaint back as a value it can hand to the
+    # author, and an exception out of an action callback is a traceback in
+    # Indigo's log and a `None` at the caller. They raise only for a bug in
+    # the call itself.
+
+    def validate_config(self, action, dev=None, caller_waiting_for_result=None):
+        """Is this document a configuration this plugin would load?
+
+        The one and only validator is :func:`lamplighter.config.load_config`,
+        the same call ``_read_config`` makes -- a second implementation of
+        "is this valid" is a second opinion, and the one that is wrong is
+        always the one the author is holding.
+
+        ``{"ok": True, "zones": [...], "enabled": [...]}`` or
+        ``{"ok": False, "path": "zones/0/hold_seconds", "message": "..."}``.
+        The path is what turns "invalid" into a value an author can go and
+        fix, so it is a field rather than prose inside the message.
+
+        Nothing is applied. A document that validates here is not running
+        anywhere until it is written to the configuration file.
+        """
+        raw = action.props.get("config_json")
+        if raw is None:
+            # A caller bug, not a bad document: there is nothing to validate
+            # and answering "not ok" would report the author's file as broken
+            # when the file was never sent.
+            raise ValueError(
+                "validate_config needs a 'config_json' prop holding the document "
+                "to validate; none was sent"
+            )
+
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", errors="replace")
+        if isinstance(raw, str):
+            try:
+                document = json.loads(raw)
+            except ValueError as exc:
+                return {"ok": False, "path": "", "message": f"not valid JSON: {exc}"}
+        else:
+            # Already parsed -- an in-process caller handing over the dict.
+            document = raw
+
+        if is_starter_document(document):
+            return {"ok": True, "zones": [], "enabled": []}
+
+        try:
+            config = load_config(
+                document, self.sun or IndigoSun(logger=self.logger), dt.date.today()
+            )
+        except ConfigError as exc:
+            return {"ok": False, "path": exc.path or "", "message": exc.message}
+        except Exception as exc:
+            # The loader raised something that is not a ConfigError, which
+            # means the document reached a check that was not expecting its
+            # shape at all. Still an answer rather than a traceback at the
+            # caller, but it is logged in full here because it is a loader
+            # bug and not the author's mistake.
+            self.logger.exception(
+                "Lamplighter: validating a configuration raised something other than "
+                "a ConfigError; the document was refused and the traceback above is "
+                "a bug in the loader, not in the document"
+            )
+            return {
+                "ok": False,
+                "path": "",
+                "message": (
+                    f"the loader raised {type(exc).__name__}: {exc}. This is a bug in "
+                    "Lamplighter rather than a rule the document broke; the plugin log "
+                    "has the traceback."
+                ),
+            }
+
+        return {
+            "ok": True,
+            "zones": [zone.name for zone in config.zones],
+            "enabled": [zone.name for zone in config.zones if zone.enabled],
+        }
+
+    def explain_zone(self, action, dev=None, caller_waiting_for_result=None):
+        """Why one zone is doing what it is doing, or would at another time.
+
+        With no ``at``, this is the zone's live explain line plus the plan it
+        is holding right now. With one, it is a **dry run**: the period, the
+        state and the levels resolved against that instant from the inputs
+        the zone holds now, deciding nothing and writing nothing (see
+        :meth:`lamplighter.zone.Zone.dry_run`). That is the question an
+        author asks before saving a period edit.
+
+        The line is logged at INFO as well as returned, so that an action
+        group can be pointed at this and read in the event log.
+        """
+        if self.engine is None:
+            message = (
+                "Lamplighter did not start; there are no zones to explain. See the "
+                "startup error in the event log."
+            )
+            self.logger.warning(f"Lamplighter: {message}")
+            return {"ok": False, "message": message}
+
+        # `zone_name`, the same prop every zone-taking action reads. It is
+        # not routed through _action_zone: that logs the complaint and
+        # returns, and this one has to hand the complaint back as a value.
+        zone_name = str(action.props.get("zone_name", "") or "")
+        zone = self.engine.zones.get(zone_name)
+        if zone is None:
+            # Returned, never raised: Indigo's action layer turns an
+            # exception here into a traceback with no hint that the zone name
+            # is simply stale, and the caller gets None either way.
+            message = f"no zone named {zone_name!r}; zones are: " + (
+                ", ".join(sorted(self.engine.zones)) or "none"
+            )
+            self.logger.warning(f"Lamplighter: {message}")
+            return {"ok": False, "message": message}
+
+        raw_at = str(action.props.get("at", "") or "").strip()
+        if raw_at:
+            try:
+                at = dt.datetime.fromisoformat(raw_at)
+            except ValueError:
+                message = (
+                    f"{raw_at!r} is not a time this action understands; write it as "
+                    "YYYY-MM-DDTHH:MM in local time, or leave it blank for now"
+                )
+                self.logger.warning(f"Lamplighter: {message}")
+                return {"ok": False, "message": message}
+            run = zone.dry_run(at)
+            text, levels = run.text, run.levels
+        else:
+            at = dt.datetime.now()
+            text = f"{zone.explain(at)} Desired now: {zone.desired_summary(at)}."
+            levels = zone.desired_levels(at)
+
+        self.logger.info(text)
+        return {
+            "ok": True,
+            "zone": zone.name,
+            "at": at.strftime("%Y-%m-%dT%H:%M:%S"),
+            "explain": text,
+            # Keys as strings: an Indigo device id is an int, but a dict
+            # crossing the executeAction bridge is safest with string keys,
+            # and it is the shape the configuration file writes levels in.
+            "desired": {str(light): levels[light] for light in sorted(levels)},
+        }
+
     def _action_zone(self, action, allow_all=False):
         """The zone an action names. ``None`` means all; ``False`` means stop.
 
@@ -480,7 +648,7 @@ class Plugin(indigo.PluginBase):
         except ValueError as exc:
             return None, f"{self.config_file} is not valid JSON ({exc})"
 
-        if isinstance(document, dict) and document.get("zones") == []:
+        if is_starter_document(document):
             return EMPTY_CONFIG, "no zones are configured yet"
 
         try:
