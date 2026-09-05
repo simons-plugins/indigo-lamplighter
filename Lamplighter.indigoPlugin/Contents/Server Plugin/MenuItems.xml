@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!-- PRD 5.13. An empty <MenuItem/> is a separator: undocumented, but it is
+     what the installed plugins do and it is what Indigo renders. -->
+
+<MenuItems>
+    <MenuItem id="print_zone_states">
+        <Name>Print zone states</Name>
+        <CallbackMethod>print_zone_states</CallbackMethod>
+    </MenuItem>
+    <MenuItem id="explain_all_zones">
+        <Name>Explain all zones</Name>
+        <CallbackMethod>explain_all_zones</CallbackMethod>
+    </MenuItem>
+    <MenuItem/>
+    <MenuItem id="reload_config_now">
+        <Name>Reload configuration now</Name>
+        <CallbackMethod>reload_config_now</CallbackMethod>
+    </MenuItem>
+</MenuItems>

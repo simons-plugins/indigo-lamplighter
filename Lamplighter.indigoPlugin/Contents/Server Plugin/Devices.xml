@@ -1,0 +1,203 @@
+<?xml version="1.0"?>
+<!-- Two device types, both relays, because in both cases the thing a person
+     wants to switch is a single on/off:
+
+       lamplighter_zone       on/off IS the zone's enable
+       lamplighter_controller on/off IS the plugin's global enable
+
+     Zone devices are created by the plugin for every zone in lamplighter.json
+     that does not already have one, and are matched back to their zone by the
+     zone_name plugin prop, never by name (a user may rename a device freely).
+
+     The <State> ids below are pinned by tests/test_indigo_sync.py to the keys
+     lamplighter/indigo_sync.py publishes, which are in turn pinned to the keys
+     zone.snapshot() emits. A state declared here and not published shows as a
+     device that quietly stopped moving; a state published and not declared is
+     an update Indigo rejects whole. Add to one, add to all three.
+
+     NOTE: `lux` is a String state, not a Number, on purpose. Indigo numbers
+     have no way to say "this sensor has never answered", and publishing 0 for
+     an unread sensor is indistinguishable from a pitch-dark room. `dark` is
+     the boolean a trigger should gate on. -->
+
+<Devices>
+    <Device type="relay" id="lamplighter_zone">
+        <Name>Lamplighter Zone</Name>
+        <ConfigUI>
+            <Field id="zone_name" type="textfield">
+                <Label>Zone name:</Label>
+                <Description>Must match a zone name in lamplighter.json exactly.</Description>
+            </Field>
+            <Field id="zone_name_help" type="label" fontSize="small" alignWithControl="true">
+                <Label>The plugin creates one of these for every configured zone, so you should not normally need to make one by hand. Turning this device off disables the zone until the configuration file is next reloaded.</Label>
+            </Field>
+        </ConfigUI>
+        <States>
+            <State id="state">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Zone State</TriggerLabel>
+                <ControlPageLabel>Zone State</ControlPageLabel>
+            </State>
+            <State id="presence_active">
+                <ValueType boolType="YesNo">Boolean</ValueType>
+                <TriggerLabel>Presence Active</TriggerLabel>
+                <ControlPageLabel>Presence Active</ControlPageLabel>
+            </State>
+            <State id="presence_last_seen">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Presence Last Seen</TriggerLabel>
+                <ControlPageLabel>Presence Last Seen</ControlPageLabel>
+            </State>
+            <State id="lux">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Lux Reading</TriggerLabel>
+                <ControlPageLabel>Lux Reading</ControlPageLabel>
+            </State>
+            <State id="dark">
+                <ValueType boolType="YesNo">Boolean</ValueType>
+                <TriggerLabel>Dark</TriggerLabel>
+                <ControlPageLabel>Dark</ControlPageLabel>
+            </State>
+            <State id="period">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Active Period</TriggerLabel>
+                <ControlPageLabel>Active Period</ControlPageLabel>
+            </State>
+            <State id="override_device">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Override Device</TriggerLabel>
+                <ControlPageLabel>Override Device</ControlPageLabel>
+            </State>
+            <State id="override_expires">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Override Expires</TriggerLabel>
+                <ControlPageLabel>Override Expires</ControlPageLabel>
+            </State>
+            <State id="desired_summary">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Desired Levels</TriggerLabel>
+                <ControlPageLabel>Desired Levels</ControlPageLabel>
+            </State>
+            <State id="explain">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Explain</TriggerLabel>
+                <ControlPageLabel>Explain</ControlPageLabel>
+            </State>
+            <State id="evaluations_today">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Evaluations Today</TriggerLabel>
+                <ControlPageLabel>Evaluations Today</ControlPageLabel>
+            </State>
+            <State id="writes_today">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Writes Today</TriggerLabel>
+                <ControlPageLabel>Writes Today</ControlPageLabel>
+            </State>
+            <State id="overrides_today">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Overrides Today</TriggerLabel>
+                <ControlPageLabel>Overrides Today</ControlPageLabel>
+            </State>
+            <State id="last_trigger">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Last Trigger</TriggerLabel>
+                <ControlPageLabel>Last Trigger</ControlPageLabel>
+            </State>
+
+            <!-- The persisted record (PRD 5.10, "Persisted across restarts").
+                 Written as strings so that "never decided" survives as "" and
+                 does not come back from a boolean state as False. -->
+            <State id="persist_version">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Persisted: Record Version</TriggerLabel>
+                <ControlPageLabel>Persisted: Record Version</ControlPageLabel>
+            </State>
+            <State id="persist_presence_last_seen">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Persisted: Presence Last Seen</TriggerLabel>
+                <ControlPageLabel>Persisted: Presence Last Seen</ControlPageLabel>
+            </State>
+            <State id="persist_dark">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Persisted: Dark Verdict</TriggerLabel>
+                <ControlPageLabel>Persisted: Dark Verdict</ControlPageLabel>
+            </State>
+            <State id="persist_override_device">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Persisted: Override Device</TriggerLabel>
+                <ControlPageLabel>Persisted: Override Device</ControlPageLabel>
+            </State>
+            <State id="persist_override_since">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Persisted: Override Since</TriggerLabel>
+                <ControlPageLabel>Persisted: Override Since</ControlPageLabel>
+            </State>
+            <State id="persist_override_expires">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Persisted: Override Expires</TriggerLabel>
+                <ControlPageLabel>Persisted: Override Expires</ControlPageLabel>
+            </State>
+            <State id="persist_override_extended_count">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Persisted: Override Extensions</TriggerLabel>
+                <ControlPageLabel>Persisted: Override Extensions</ControlPageLabel>
+            </State>
+            <State id="persist_override_duration_minutes">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Persisted: Override Duration</TriggerLabel>
+                <ControlPageLabel>Persisted: Override Duration</ControlPageLabel>
+            </State>
+            <State id="persist_override_extend_minutes">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Persisted: Override Extension Minutes</TriggerLabel>
+                <ControlPageLabel>Persisted: Override Extension Minutes</ControlPageLabel>
+            </State>
+        </States>
+    </Device>
+
+    <Device type="relay" id="lamplighter_controller">
+        <Name>Lamplighter Controller</Name>
+        <ConfigUI>
+            <Field id="controller_help" type="label" fontSize="small" alignWithControl="false">
+                <Label>Turning this device off stops every zone writing to a light, without changing any zone's own enable. One device for "all automation off". The plugin keeps one of these; you should not need a second.</Label>
+            </Field>
+        </ConfigUI>
+        <States>
+            <State id="zones">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Zones Configured</TriggerLabel>
+                <ControlPageLabel>Zones Configured</ControlPageLabel>
+            </State>
+            <State id="zones_enabled">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Zones Enabled</TriggerLabel>
+                <ControlPageLabel>Zones Enabled</ControlPageLabel>
+            </State>
+            <State id="zones_overridden">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Zones Overridden</TriggerLabel>
+                <ControlPageLabel>Zones Overridden</ControlPageLabel>
+            </State>
+            <State id="evaluations_today">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Evaluations Today</TriggerLabel>
+                <ControlPageLabel>Evaluations Today</ControlPageLabel>
+            </State>
+            <State id="writes_today">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Writes Today</TriggerLabel>
+                <ControlPageLabel>Writes Today</ControlPageLabel>
+            </State>
+            <State id="overrides_today">
+                <ValueType>Number</ValueType>
+                <TriggerLabel>Overrides Today</TriggerLabel>
+                <ControlPageLabel>Overrides Today</ControlPageLabel>
+            </State>
+            <State id="config_status">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Configuration Status</TriggerLabel>
+                <ControlPageLabel>Configuration Status</ControlPageLabel>
+            </State>
+        </States>
+    </Device>
+</Devices>

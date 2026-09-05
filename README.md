@@ -7,8 +7,68 @@ person has taken over), never from diffing live device state.
 
 Successor to the `indigo-auto-lights` fork. Design: [`docs/plans/PRD-indigo-lamplighter.md`](docs/plans/PRD-indigo-lamplighter.md).
 
-Status: M0 — schema, example config and the acceptance suite as strict `xfail`
-stubs. No engine yet.
+Status: M2 — engine plus the Indigo plugin bundle: zone and controller
+devices, actions, menu items, config load/reload/persist and logging. No web
+page yet.
+
+## Install
+
+**First install: double-click `Lamplighter.indigoPlugin` on the Indigo
+server.** Indigo has to register the bundle itself; copying the folder into
+`Plugins/` works only for *later* updates to a bundle it has already
+installed, and a copied first install shows up as a plugin that will not
+start.
+
+Updating an installed plugin: copy the changed files into
+
+```
+/Library/Application Support/Perceptive Automation/Indigo 2025.2/Plugins/Lamplighter.indigoPlugin/Contents/Server Plugin/
+```
+
+and reload the plugin (Plugins → Lamplighter → Reload). Adding or changing a
+device *state* needs a plugin restart, not just a reload, because the state
+list is refreshed in `deviceStartComm`.
+
+On first start the plugin creates:
+
+- one **Lamplighter Zone** device per zone in the configuration — its on/off
+  is that zone's enable, and its states carry everything in PRD section 5.10
+  (`state`, `presence_active`, `lux`, `dark`, `period`, `explain`, the day's
+  counters, and the persisted override);
+- one **Lamplighter Controller** device — its on/off is the global enable, so
+  "all automation off" is one switch, and it carries the zone counts, the
+  summed counters and the configuration status.
+
+A zone that later disappears from the configuration keeps its device: nothing
+is ever deleted for you. The device says so in its `explain` state and the
+plugin names it once at WARNING.
+
+## Configuration
+
+Zones live in one JSON file, in one fixed place:
+
+```
+<Indigo install folder>/Preferences/Plugins/com.simons-plugins.indigo-lamplighter/lamplighter.json
+```
+
+which on a stock 2025.2 server is
+
+```
+/Library/Application Support/Perceptive Automation/Indigo 2025.2/Preferences/Plugins/com.simons-plugins.indigo-lamplighter/lamplighter.json
+```
+
+The plugin writes `{"version": 1, "zones": []}` there if the file is missing,
+watches its modification time, and reloads within five seconds of a save.
+Overrides, presence and the dark verdict survive the reload (a zone switched
+off in the new file does *not* survive — the file is what `enabled` means).
+**A file that does not validate is refused whole**: the error names the
+failing path, is logged once per edit, appears on the controller device's
+`config_status` state, and the previous configuration keeps running.
+
+See [`examples/lamplighter.example.json`](examples/lamplighter.example.json)
+for a worked file and
+`Lamplighter.indigoPlugin/Contents/Server Plugin/lamplighter/schema.json`
+for the schema.
 
 ## Development
 
@@ -18,10 +78,10 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-Expect **passes from `tests/test_schema.py` and a large block of `xfailed`** —
-that is the M0 state, not a broken checkout.
+Everything passes and nothing is `xfailed`: the promises below were written
+first as strict `xfail` stubs and have all since been replaced by real tests.
 
-### The acceptance suite is written before the engine, and it is strict
+### The acceptance suite was written before the engine, and it is strict
 
 `tests/test_promises_*.py` holds one stub per promise in PRD section 7, each
 marked:

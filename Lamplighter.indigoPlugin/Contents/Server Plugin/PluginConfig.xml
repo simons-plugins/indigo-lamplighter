@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<!-- Log level and nothing else. The configuration file's location is fixed
+     (PRD 5.11) so that there is exactly one place it can be, and the label
+     below says where. -->
+
+<PluginConfig>
+    <Field id="log_level" type="menu" defaultValue="20">
+        <Label>Event Logging Level:</Label>
+        <List>
+            <Option value="10">Debugging Messages</Option>
+            <Option value="20">Informational Messages</Option>
+            <Option value="30">Warning Messages</Option>
+            <Option value="40">Error Messages</Option>
+            <Option value="50">Critical Errors Only</Option>
+        </List>
+    </Field>
+    <Field id="config_location" type="label" fontSize="small" alignWithControl="false">
+        <Label>Zones are configured in lamplighter.json, under Preferences/Plugins/com.simons-plugins.indigo-lamplighter/ in your Indigo installation folder. The plugin watches the file and reloads it within five seconds of a save; if the new file does not validate, the error is logged and the previous configuration keeps running.</Label>
+    </Field>
+</PluginConfig>

@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<!-- PRD 5.13. The zone pickers are all one dynamic list callback,
+     get_zone_list, filtered: filter="all" prepends an "All zones" entry, so
+     "reset override" can mean the whole house and "lock zone" cannot. -->
+
+<Actions>
+    <Action id="reset_override">
+        <Name>Reset Override</Name>
+        <CallbackMethod>reset_override</CallbackMethod>
+        <ConfigUI>
+            <Field id="zone_name" type="menu" defaultValue="__all__">
+                <Label>Zone:</Label>
+                <List class="self" filter="all" method="get_zone_list"/>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <Action id="lock_zone">
+        <Name>Lock Zone</Name>
+        <CallbackMethod>lock_zone</CallbackMethod>
+        <ConfigUI>
+            <Field id="zone_name" type="menu">
+                <Label>Zone:</Label>
+                <List class="self" filter="" method="get_zone_list"/>
+            </Field>
+            <Field id="lock_zone_help" type="label" fontSize="small" alignWithControl="true">
+                <Label>Holds the zone at whatever its lights are now, exactly as if somebody had moved a dimmer, for the period's override duration. Release it with Reset Override.</Label>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <Action id="set_zone_enabled">
+        <Name>Set Zone Enabled</Name>
+        <CallbackMethod>set_zone_enabled</CallbackMethod>
+        <ConfigUI>
+            <Field id="zone_name" type="menu">
+                <Label>Zone:</Label>
+                <List class="self" filter="" method="get_zone_list"/>
+            </Field>
+            <Field id="enabled" type="menu" defaultValue="on">
+                <Label>Enabled:</Label>
+                <List>
+                    <Option value="on">On</Option>
+                    <Option value="off">Off</Option>
+                </List>
+            </Field>
+        </ConfigUI>
+    </Action>
+
+    <Action id="reconcile_now">
+        <Name>Reconcile Now</Name>
+        <CallbackMethod>reconcile_now</CallbackMethod>
+    </Action>
+</Actions>
