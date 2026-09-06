@@ -64,7 +64,7 @@ _DEVICE_KEY_RE = re.compile(r"^[1-9][0-9]*$")
 
 _ROOT_KEYS = ("version", "reconcile_seconds", "echo_window_seconds", "zones")
 _ZONE_REQUIRED = ("name", "presence_devices", "hold_seconds", "lux", "lights", "periods")
-_ZONE_KEYS = _ZONE_REQUIRED + ("enabled", "override")
+_ZONE_KEYS = _ZONE_REQUIRED + ("enabled", "override", "presence_variables")
 _LUX_REQUIRED = ("device", "dark_below")
 _LUX_KEYS = _LUX_REQUIRED + ("dark_below_variable_id", "hysteresis", "when_unreadable")
 _ZONE_OVERRIDE_KEYS = (
@@ -133,6 +133,12 @@ class ZoneConfig:
     periods: tuple[Period, ...]
     enabled: bool = True
     override: OverrideConfig = field(default_factory=OverrideConfig)
+    #: Indigo variable ids that count as presence inputs alongside
+    #: presence_devices, sharing the same any-on semantics (PRD section 5.4).
+    #: Device ids and variable ids are different Indigo namespaces, but both
+    #: are unique house-wide, so the two lists must not repeat an id between
+    #: them (checked in ``_zone`` below).
+    presence_variables: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -242,6 +248,15 @@ def _device_id(value, path):
 def _device_ids(value, path, min_items=0):
     items = _array(value, path, min_items=min_items, unique=True)
     return tuple(_device_id(item, f"{path}/{i}") for i, item in enumerate(items))
+
+
+def _variable_id(value, path):
+    return _int(value, path, minimum=1, what="an Indigo variable id (a positive integer)")
+
+
+def _variable_ids(value, path, min_items=0):
+    items = _array(value, path, min_items=min_items, unique=True)
+    return tuple(_variable_id(item, f"{path}/{i}") for i, item in enumerate(items))
 
 
 def _time_expr(value, path):
@@ -456,6 +471,18 @@ def _zone(raw, path, sun, today):
     presence_devices = _device_ids(
         raw["presence_devices"], f"{path}/presence_devices", min_items=1
     )
+    presence_variables = _variable_ids(
+        raw.get("presence_variables", []), f"{path}/presence_variables"
+    )
+    overlap = sorted(set(presence_devices) & set(presence_variables))
+    if overlap:
+        _fail(
+            f"{path}/presence_variables",
+            f"{overlap} already appear in presence_devices; a device id and a "
+            "variable id are different Indigo namespaces, but the same id may "
+            "not be listed as both a presence device and a presence variable "
+            "in this zone",
+        )
     hold_seconds = _int(raw["hold_seconds"], f"{path}/hold_seconds", minimum=0, maximum=86400)
     lux = _lux(raw["lux"], f"{path}/lux")
     lights = _device_ids(raw["lights"], f"{path}/lights", min_items=1)
@@ -478,6 +505,7 @@ def _zone(raw, path, sun, today):
         periods=periods,
         enabled=enabled,
         override=override,
+        presence_variables=presence_variables,
     )
 
 

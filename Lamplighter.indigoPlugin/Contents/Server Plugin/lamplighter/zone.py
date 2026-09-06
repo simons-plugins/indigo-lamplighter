@@ -228,8 +228,13 @@ class Zone:
         scheduled; a worker that never heard about it would sleep through the
         room emptying. It still produces no transition of its own: the room
         is occupied for ``hold_seconds`` more.
+
+        ``device_id`` is also, for a presence variable, an Indigo variable
+        id -- device ids and variable ids are different Indigo namespaces,
+        but both are unique house-wide, so they can share this one id space
+        in ``self.presence.on_devices`` without ever colliding.
         """
-        if device_id not in self.config.presence_devices:
+        if device_id not in self.config.presence_devices and device_id not in self.config.presence_variables:
             return False
         return bool(self.presence.update(device_id, is_on, now))
 
@@ -904,6 +909,19 @@ class Zone:
             text=text,
         )
 
+    def _presence_label(self, input_id) -> str:
+        """A presence input's name for the explain line, device or variable.
+
+        ``self.presence.on_devices`` holds device ids and variable ids in one
+        set (see :meth:`ingest_presence`), so the label has to ask which
+        namespace this id actually belongs to before resolving it -- a
+        variable id handed to the device lookup would just fail and read as
+        "device 1872770829", which is not what a phone-presence variable is.
+        """
+        if input_id in self.config.presence_variables:
+            return _variable_label(input_id)
+        return _device_label(input_id)
+
     def _presence_phrase(self) -> str:
         """Why presence reads the way it does: who is on, or how long ago.
 
@@ -916,7 +934,7 @@ class Zone:
         """
         if self.presence.on_devices:
             names = ", ".join(
-                _device_label(dev_id) for dev_id in sorted(self.presence.on_devices)
+                self._presence_label(input_id) for input_id in sorted(self.presence.on_devices)
             )
             return f"{names} on"
         if self.presence.last_seen is None:
@@ -981,6 +999,20 @@ def _device_label(dev_id) -> str:
     except (devices.DeviceGone, devices.LookupFailed):
         return f"device {dev_id}"
     return str(name) or f"device {dev_id}"
+
+
+def _variable_label(var_id) -> str:
+    """A presence variable's name for the explain line, prefixed like R14 wants.
+
+    Same fallback rule as :func:`_device_label`: a label only, so a lookup
+    that will not answer falls back to the id rather than taking the line
+    down.
+    """
+    try:
+        name = getattr(devices.get_variable(var_id), "name", "")
+    except (devices.DeviceGone, devices.LookupFailed):
+        return f"variable {var_id}"
+    return f"variable {name}" if name else f"variable {var_id}"
 
 
 def _capped(level, limit):

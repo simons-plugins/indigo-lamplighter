@@ -88,6 +88,22 @@ def get_device(dev_id):
         raise LookupFailed(dev_id, exc) from exc
 
 
+def get_variable(var_id):
+    """The Indigo variable object with this id.
+
+    Raises :class:`DeviceGone` (``kind="variable"``) if there is no such
+    variable and :class:`LookupFailed` if the lookup itself broke -- the same
+    two failures as :func:`get_device`, for a caller that needs more than the
+    value (its name, for a log line or an explain line).
+    """
+    try:
+        return indigo.variables[var_id]
+    except KeyError:
+        raise DeviceGone(var_id, kind="variable") from None
+    except Exception as exc:
+        raise LookupFailed(var_id, exc, kind="variable") from exc
+
+
 def get_variable_value(var_id):
     """The value of the Indigo variable with this id, as Indigo stores it.
 
@@ -96,13 +112,7 @@ def get_variable_value(var_id):
     number" is a different condition from "this variable is not there" and
     the two want different messages.
     """
-    try:
-        variable = indigo.variables[var_id]
-    except KeyError:
-        raise DeviceGone(var_id, kind="variable") from None
-    except Exception as exc:
-        raise LookupFailed(var_id, exc, kind="variable") from exc
-    return getattr(variable, "value", None)
+    return getattr(get_variable(var_id), "value", None)
 
 
 # ------------------------------------------------------------- the warnings

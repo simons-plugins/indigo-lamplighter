@@ -114,6 +114,25 @@ def light_reported(previous_dev, current_dev) -> bool:
         return False
 
 
+#: The true-ish words a presence variable's value is compared against,
+#: lower-cased and stripped (PRD section 5.4). Anything else, including an
+#: empty string, reads as OFF.
+_PRESENCE_TRUE_WORDS = {"true", "on", "yes", "1", "home"}
+
+
+def variable_is_on(value) -> bool:
+    """Is this Indigo variable value a presence-on reading?
+
+    Indigo variable values are strings, and the house's phone-presence
+    variable (``SimonHome``) is set to the words "true"/"false", not to an
+    on/off state, so this is a word list rather than a boolean cast. Any
+    value that is not one of these words -- including an empty one -- is
+    OFF, never an error: a presence variable degrades to "nobody here", the
+    safe direction for a light.
+    """
+    return str(value).strip().lower() in _PRESENCE_TRUE_WORDS
+
+
 def presence_is_on(device) -> bool:
     """Is this presence device reporting? Any of the three readings, any-of.
 
@@ -286,26 +305,68 @@ class Engine:
     def variable_updated(self, var_id, now: dt.datetime) -> list:
         """An Indigo variable changed; re-read the zones that gate on it.
 
-        Only ``dark_below_variable_id`` is watched. Re-reading is cheap and
-        the verdict is what matters: a threshold nudged from 2200 to 2210
-        moves no zone, and only a flip is an input edge.
+        Two independent things watch a variable: ``dark_below_variable_id``
+        (one per zone's lux gate) and ``presence_variables`` (any number per
+        zone). Re-reading is cheap and the verdict is what matters -- a
+        threshold nudged from 2200 to 2210, or a value re-set to the same
+        true-ish word, moves no zone, and only a flip is an input edge.
         """
         edges = []
         for zone in self.zones.values():
             config = zone.config
-            if config.lux is None or config.lux.dark_below_variable_id != var_id:
-                continue
-            zone.is_dark()
-            if zone.lux.changed:
-                edges.append(
-                    self._mark_dirty(
-                        zone,
-                        f"dark_below variable {var_id} changed the verdict to "
-                        f"{'dark' if zone.lux.verdict else 'bright'}",
-                        kind="variable",
+            if config.lux is not None and config.lux.dark_below_variable_id == var_id:
+                zone.is_dark()
+                if zone.lux.changed:
+                    edges.append(
+                        self._mark_dirty(
+                            zone,
+                            f"dark_below variable {var_id} changed the verdict to "
+                            f"{'dark' if zone.lux.verdict else 'bright'}",
+                            kind="variable",
+                        )
                     )
-                )
+            if var_id in config.presence_variables:
+                edge = self._presence_variable_changed(zone, var_id, now)
+                if edge is not None:
+                    edges.append(edge)
         return edges
+
+    def _presence_variable_changed(self, zone, var_id, now):
+        """A presence variable, gated on the reading exactly as devices are (R4).
+
+        A variable event carries no before/after snapshot the way a device
+        event does -- Indigo hands back only the id -- so "the previous
+        reading" is read off the zone's own presence state instead: whether
+        this id was already counted as on. That answers the same question a
+        snapshot comparison would for a device, so a variable re-set to the
+        same true-ish value is not an edge here either, and it needs no extra
+        state of its own.
+
+        A variable that cannot be looked up is never allowed to raise on the
+        callback thread. Gone is warned once and read as off -- the safe
+        direction for a light. A lookup that merely *failed* teaches nothing,
+        so the event is skipped rather than guessed at (R15); the zone keeps
+        whatever it last believed.
+        """
+        try:
+            variable = devices.get_variable(var_id)
+        except devices.DeviceGone:
+            devices.warn_gone_once(self.logger, var_id, zone.name, kind="variable")
+            is_on, label = False, f"variable {var_id}"
+        except devices.LookupFailed as exc:
+            devices.warn_lookup_failed_once(self.logger, var_id, zone.name, exc.cause, kind="variable")
+            return None
+        else:
+            devices.forget_warnings(var_id, kind="variable")
+            is_on = variable_is_on(getattr(variable, "value", None))
+            label = getattr(variable, "name", None) or f"variable {var_id}"
+
+        was_on = var_id in zone.presence.on_devices
+        if was_on == is_on:
+            return None
+        if not zone.ingest_presence(var_id, is_on, now):
+            return None
+        return self._mark_dirty(zone, f"presence: variable {label}", kind="presence")
 
     # --------------------------------------------------------- the worker thread
 
@@ -439,6 +500,24 @@ class Engine:
             # Deliberately no `else: ingest(..., False, ...)`. An "off" now
             # stamps last_seen, so seeding the off devices would push the hold
             # forward on every seed and an empty room would never time out.
+
+        for var_id in zone.config.presence_variables:
+            try:
+                variable = devices.get_variable(var_id)
+            except devices.DeviceGone:
+                devices.warn_gone_once(self.logger, var_id, zone.name, kind="variable")
+                continue
+            except devices.LookupFailed as exc:
+                devices.warn_lookup_failed_once(self.logger, var_id, zone.name, exc.cause, kind="variable")
+                readable = False
+                continue
+            devices.forget_warnings(var_id, kind="variable")
+            if variable_is_on(getattr(variable, "value", None)):
+                # Same R-seed rule as a presence device: a zone enabled while
+                # the phone-presence variable already reads "true" starts
+                # occupied, not "never seen" (the 2026-09-05 defect for a
+                # sensor, repeated here for a variable would be the same bug).
+                zone.ingest_presence(var_id, True, now)
 
         zone.read_lux(now)
 

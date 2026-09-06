@@ -70,7 +70,7 @@ fix, with the evidence. These are the acceptance criteria, not background.
 | R1 | Manual override is judged from the device-change **transition** (before-state at desired, after-state off desired), per device, never from a live re-read. | Fork #15: revert landed first, live read saw nothing. 2026-09-03 19:46:35, transition rule locked 112 ms after the command. |
 | R2 | Our own writes never create an override: we only command devices that are off desired, so every echo starts off desired. | Fork attempt 1 (194e6af) locked on every ramp step. |
 | R3 | An echo of our command that arrives after the desired level moved back onto the device's pre-command state is still ours: remember the state each device was commanded away from, 15 s, consumed once. | Review of #16: in-room lux rises → not dark → lights off → delayed on-echo read as override. |
-| R4 | A zone re-plans only when an **input** changes: presence on/off, presence last-seen crossing the hold, lux crossing the (hysteresis-widened) threshold, a period boundary, an override starting or ending. Not on any device update. | Occupatum ticked every 1.2 s → hundreds of re-plans an hour → reverts within a second, 10 s callback lag. |
+| R4 | A zone re-plans only when an **input** changes: presence on/off, presence last-seen crossing the hold, lux crossing the (hysteresis-widened) threshold, a period boundary, an override starting or ending. Not on any device update. Presence itself may come from an Indigo variable as well as a device (`presence_variables`), on the same any-of, edge-gated terms. | Occupatum ticked every 1.2 s → hundreds of re-plans an hour → reverts within a second, 10 s callback lag. |
 | R5 | Brightness comparisons use a proportional band: `max(1, ceil(10 % of target))`, with 0 and 100 exact. | zigbee2mqtt truncates both ways (30 → 29); a group dimmer reads back 45..48 for 50. |
 | R6 | A late reporter (a device whose state arrives seconds or more after the command) is neither retried nor suppressed nor treated as an override; it is reconciled when it finally reports. | Under the fork's 2 s confirm-and-suppress machinery, any light that had not reported by the re-check could read as a manual override; the workaround was `exclude_from_lock_dev_ids`. |
 | R7 | A dimmer that flashes to its previous level before settling must not lock. | Tuya TS0502B turn-on behaviour; covered by R1 (previous state off desired). |
@@ -153,6 +153,12 @@ that fed the decision (R14).
 
 - `presence_devices`: any Indigo device with an on/off state, any-of.
   Occupatum zone devices are accepted as one such device during migration.
+- `presence_variables`: Indigo variable ids that count as presence inputs
+  alongside `presence_devices`, same any-of semantics. A variable reads ON
+  when its value, lower-cased and stripped, is one of `true` / `on` / `yes` /
+  `1` / `home`, and OFF for anything else, including empty -- how the house's
+  phone-presence variable (`SimonHome`, set to the string "true"/"false")
+  becomes a presence input without a shadow relay device.
 - **The rule is Occupatum's: the zone is occupied while ANY presence device is
   on, and the off-delay starts only when the LAST one clears.** Not
   `now - last_seen < hold`, which is a different rule that happens to agree

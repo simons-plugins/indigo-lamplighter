@@ -99,6 +99,29 @@ def test_a_null_lux_block_means_no_daylight_gate():
     assert load().zones[0].lux is None
 
 
+def test_presence_variables_load_as_ints_and_default_to_empty():
+    """A zone with no `presence_variables` key gets the empty tuple, not None.
+
+    Kills: a default of `None` (breaks any caller iterating it) and a loader
+    that leaves the JSON strings/floats as they arrived instead of ints.
+    """
+    assert load().zones[0].presence_variables == ()
+    zone = load(presence_variables=[1872770829]).zones[0]
+    assert zone.presence_variables == (1872770829,)
+
+
+def test_a_duplicate_presence_variable_is_refused():
+    """Device ids and variable ids are different namespaces, but the SAME id
+    listed as both is refused rather than silently accepted twice over.
+
+    Kills: a loader that validates `presence_variables` in isolation and
+    never checks it against `presence_devices`.
+    """
+    with pytest.raises(ConfigError) as caught:
+        load(presence_devices=[101], presence_variables=[101])
+    assert caught.value.path == "zones/0/presence_variables"
+
+
 def test_a_period_override_is_a_replacement_block():
     zone = load(
         periods=[

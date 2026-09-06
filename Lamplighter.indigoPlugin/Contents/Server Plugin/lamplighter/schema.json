@@ -245,6 +245,16 @@
           "description": "Any Indigo devices with an on/off state, combined any-of: one reporting on is presence (PRD section 5.4). Raw PIRs, mmWave radar, door contacts, or an Occupatum zone device during migration. Presence hold lives in this zone (see 'hold_seconds'), so raw sensors need no second plugin to say 'still here'.",
           "items": { "$ref": "#/$defs/device_id" }
         },
+        "presence_variables": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "Indigo variable ids that count as presence inputs alongside presence_devices. A variable reads ON when its value, lower-cased and stripped, is one of true / on / yes / 1 / home, and OFF for anything else (including empty). Any-on semantics are shared with presence_devices. A zone must have at least one presence input in total.",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "An Indigo variable id (the integer shown in Indigo's variable list, not the name)."
+          }
+        },
         "hold_seconds": {
           "type": "integer",
           "minimum": 0,

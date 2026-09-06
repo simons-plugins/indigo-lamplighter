@@ -328,6 +328,122 @@ def test_a_dark_below_variable_change_re_plans_only_when_the_verdict_flips():
     assert engine.variable_updated(78, clock.at(seconds=3)) == []
 
 
+#: The house's phone-presence variable, set to "true"/"false" by the app.
+SIMON_HOME = 1872770829
+
+
+def test_a_presence_variable_turning_true_makes_the_zone_occupied():
+    """SimonHome is a presence input like any device (PRD 5.4): true makes
+    the zone occupied, and false starts the hold rather than ending it
+    outright -- the same shape as `test_an_evening_in_one_zone`'s device.
+
+    Kills: `variable_updated` never looking at `presence_variables` at all.
+    """
+    import indigo
+
+    engine, zone, clock, _changed = build(presence_variables=[SIMON_HOME])
+    indigo.variables[SIMON_HOME] = indigo.Variable(SIMON_HOME, "SimonHome", "false")
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+    engine.mark_all_dirty("startup")
+    engine.tick(clock.now)
+    assert zone.state is ZoneState.VACANT
+
+    indigo.variables[SIMON_HOME].value = "true"
+    edges = engine.variable_updated(SIMON_HOME, clock.at(seconds=1))
+    assert [edge.kind for edge in edges] == ["presence"]
+    assert engine.dirty == {"Kitchen": "presence: variable SimonHome"}
+    engine.tick(clock.at(seconds=1))
+    assert zone.state is ZoneState.OCCUPIED
+
+    # False clears the reporting variable but does not end presence outright:
+    # the hold has to run out first, exactly as it does for a device.
+    indigo.variables[SIMON_HOME].value = "false"
+    edges = engine.variable_updated(SIMON_HOME, clock.at(seconds=2))
+    assert [edge.kind for edge in edges] == ["presence"]
+    engine.tick(clock.at(seconds=2))
+    assert zone.state is ZoneState.OCCUPIED, "the hold has not expired yet"
+
+    engine.tick(clock.at(seconds=2 + 300 + 1))
+    assert zone.state is ZoneState.VACANT
+
+
+def test_a_presence_variable_true_at_startup_is_seeded():
+    """The R-seed rule for a variable: a zone enabled while SimonHome already
+    reads "true" starts occupied, without any `variable_updated` call.
+
+    Kills: seeding reading `presence_devices` and skipping
+    `presence_variables` entirely -- the same jarvis defect
+    (`test_a_zone_enabled_while_the_room_is_occupied_does_not_turn_the_lights_off`)
+    repeated for a variable instead of a sensor.
+    """
+    import indigo
+
+    engine, zone, clock, _changed = build(presence_variables=[SIMON_HOME])
+    indigo.variables[SIMON_HOME] = indigo.Variable(SIMON_HOME, "SimonHome", "true")
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.seed_inputs(clock.now)
+
+    assert SIMON_HOME in zone.presence.on_devices
+    engine.mark_all_dirty("startup")
+    engine.tick(clock.now)
+    assert zone.state is ZoneState.OCCUPIED
+
+
+def test_a_missing_presence_variable_is_warned_once_and_read_as_off(caplog):
+    """A deleted or mistyped variable id must never take the callback thread
+    down, and must never read as presence.
+
+    Kills: letting the `KeyError` from `indigo.variables[...]` escape, and
+    treating "cannot look this up" as "somebody is home".
+    """
+    engine, zone, clock, _changed = build(presence_variables=[SIMON_HOME])
+    # SIMON_HOME is deliberately never installed in indigo.variables.
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        edges = engine.variable_updated(SIMON_HOME, clock.now)
+        edges += engine.variable_updated(SIMON_HOME, clock.at(seconds=1))
+
+    assert edges == []
+    assert SIMON_HOME not in zone.presence.on_devices
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, "warned once, not on every call"
+
+    engine.mark_all_dirty("startup")
+    engine.tick(clock.at(seconds=2))
+    assert zone.state is not ZoneState.OCCUPIED
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("true", True),
+        ("True ", True),
+        ("on", True),
+        ("yes", True),
+        ("1", True),
+        ("home", True),
+        ("false", False),
+        ("", False),
+        ("0", False),
+        ("away", False),
+    ],
+)
+def test_variable_truthiness_word_list(value, expected):
+    """The exact word list PRD 5.4 documents -- neither wider nor narrower."""
+    from lamplighter.engine import variable_is_on
+
+    assert variable_is_on(value) is expected
+
+
 def test_presence_readings_are_any_of_across_the_three_places_indigo_puts_them():
     """A plugin device that publishes only `states["onOffState"]` is still a
     presence device, and a tuple of all three is what the gate compares."""

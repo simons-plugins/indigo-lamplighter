@@ -113,6 +113,30 @@ def test_vacant_levels_rejects_a_bad_level_word():
     assert errors, "'dim' is not one of the level words the schema allows"
 
 
+def test_presence_variables_is_accepted_as_a_list_of_variable_ids():
+    """A zone may list Indigo variable ids as presence inputs (PRD 5.4).
+
+    Kills: a schema edit that forgot to add `presence_variables` to the
+    zone's `properties`, which would make this fail on `additionalProperties`
+    instead of validating.
+    """
+    doc = copy.deepcopy(EXAMPLE)
+    doc["zones"][0]["presence_variables"] = [1872770829]
+    assert _errors(doc) == []
+
+
+def test_presence_variables_rejects_a_non_integer():
+    """`presence_variables` holds variable ids, not names or strings.
+
+    Kills: a `presence_variables` schema that forgot to constrain its items
+    to integers and so accepted anything.
+    """
+    doc = copy.deepcopy(EXAMPLE)
+    doc["zones"][0]["presence_variables"] = ["SimonHome"]
+    errors = _errors(doc)
+    assert errors, "a variable NAME is not a variable id"
+
+
 # ------------------------------------------------------- invalid documents
 #
 # Each mutation returns the path the resulting error must carry. Errors are
