@@ -26,7 +26,7 @@ from helpers import (
 
 from lamplighter import compare
 from lamplighter.override import EchoBook, is_manual_override
-from lamplighter.reconcile import BACKOFF_TICKS, Reconciler
+from lamplighter.reconcile import BACKOFF_TICKS, PARKED_RETRY_SECONDS, Reconciler
 from lamplighter.zone import ZoneState
 
 NOW = dt.datetime(2026, 9, 4, 20, 0, 0)
@@ -130,8 +130,9 @@ def test_a_device_that_has_not_reported_yet_is_not_re_commanded_in_the_pass(monk
 
 
 def test_backoff_doubles_per_device_and_is_capped():
-    """A device still off desired is retried at 1, 2, 4, 8 ticks and then at
-    the cap, per device.
+    """A device still off desired is retried at 1, 2, 4, 8 ticks and then,
+    once that whole ladder is walked, parked and retried every
+    ``PARKED_RETRY_SECONDS`` of wall clock instead -- per device.
 
     Kills: back off per zone, which lets one broken light stall every healthy
     one in the room.
@@ -153,9 +154,16 @@ def test_backoff_doubles_per_device_and_is_capped():
 
     fired = run_passes(reconciler, zone, 30, before_pass=knock_202_off_desired)
 
-    assert fired[201] == [1, 2, 4, 8, 16, 24], (
-        "the ladder is 1, 2, 4, 8 ticks and then held at the cap of "
-        f"{BACKOFF_TICKS[-1]}"
+    # The ladder itself (1, 2, 4, 8 ticks) is unchanged; once it is walked,
+    # this suite's TICK happens to make ticks and seconds line up, so the
+    # next retry is PARKED_RETRY_SECONDS later measured in ticks, not
+    # BACKOFF_TICKS[-1] held forever.
+    parked_gap_ticks = int(PARKED_RETRY_SECONDS // TICK.total_seconds())
+    assert fired[201] == [1, 2, 4, 8, 16, 16 + parked_gap_ticks], (
+        "the ladder is 1, 2, 4, 8 ticks; once it is walked the device is "
+        f"parked and retried every {parked_gap_ticks} ticks of wall clock "
+        f"({PARKED_RETRY_SECONDS:g}s), not held at the tick cap of "
+        f"{BACKOFF_TICKS[-1]} forever"
     )
     assert fired[202] == [1, 3], (
         "the healthy light was stalled by the broken one; backoff is per "
@@ -422,3 +430,89 @@ def test_a_genuine_miss_on_a_later_target_is_still_reported(caplog):
     misses = [r for r in caplog.records if "did not reach" in r.getMessage()]
     assert len(misses) == 1, "a real failure on a new target must be reported"
     assert "wants 80" in misses[0].getMessage()
+
+
+# ---------------------------------------------------------- parked, not capped
+#
+# The live problem: two Zigbee lights on a wall switch that is normally off.
+# While the Dining Room is occupied, every reconcile pass finds them off
+# desired and commands them -- and once they are past the whole ladder, the
+# old "held at the cap" behaviour retried them every BACKOFF_TICKS[-1] = 8
+# *passes*. Passes are one counter shared by every zone in the house, so on a
+# busy evening that could be under a minute -- which is exactly the ~120
+# wasted Zigbee unicasts an hour that saturated the coordinator on 2026-08-20.
+
+
+def test_past_the_ladder_a_device_is_retried_on_wall_clock_not_passes():
+    """Once a device has walked the whole 1/2/4/8 ladder, further retries wait
+    for PARKED_RETRY_SECONDS of wall clock, not for its pass-count `next_due`
+    -- however many passes run while it is parked. A device only partway up
+    the ladder is untouched by any of this.
+
+    Kills: reconcile.Reconciler.run's `if backoff is not None and
+    backoff.not_before is not None and backoff.not_before > now: continue`
+    deleted.
+    """
+    zone_201 = occupied_zone({"201": 60}, [201])
+    make_device(201, "dimmer", brightness=0)  # never lands: walks the ladder
+    zone_202 = occupied_zone({"202": 30}, [202])
+    make_device(202, "dimmer", brightness=0)  # never lands either
+
+    commander = RecordingCommander(apply=False)
+    reconciler = Reconciler(commander, EchoBook(), LOG)
+
+    fired_201 = run_passes(reconciler, zone_201, 16)
+    assert fired_201[201] == [1, 2, 4, 8, 16], "sanity: the ladder as usual"
+    assert reconciler.backoff_step(201) == 5, "one command past the whole ladder"
+    assert reconciler.is_parked(201) is True
+
+    fired_202 = run_passes(reconciler, zone_202, 2)
+    assert fired_202[202] == [1, 2]
+    assert reconciler.backoff_step(202) == 2, "only two commands: still on the ladder"
+    assert reconciler.is_parked(202) is False
+
+    last_command_moment = NOW + TICK * 16
+    commander.clear()
+
+    # Many further passes -- far more than the pass-count ladder would ever
+    # have waited for -- all inside the next nine minutes of wall clock:
+    # nothing more is sent to 201, no matter how many passes run.
+    for offset_seconds in range(0, 540, 5):
+        reconciler.run(zone_201, last_command_moment + dt.timedelta(seconds=offset_seconds))
+    assert 201 not in commander.ids(), (
+        "a parked device was recommanded before PARKED_RETRY_SECONDS of wall "
+        "clock had passed, even though its pass-count next_due was reached "
+        "long before this loop of passes finished"
+    )
+
+    # At (or after) PARKED_RETRY_SECONDS since the last command: exactly one.
+    due = last_command_moment + dt.timedelta(seconds=PARKED_RETRY_SECONDS)
+    sent = reconciler.run(zone_201, due)
+    assert [command.device_id for command in sent] == [201]
+    assert commander.ids().count(201) == 1
+
+    # The device still on the ladder was never touched by any of the above.
+    assert reconciler.backoff_step(202) == 2
+    assert reconciler.is_parked(202) is False
+
+
+def test_the_backoff_warning_names_the_parked_cadence(caplog):
+    """The backoff warning names how often a parked device is retried, in
+    minutes derived from PARKED_RETRY_SECONDS.
+
+    Kills: reconcile.Reconciler._warn_backoff's `parked_minutes` computed
+    from a literal (e.g. 5) instead of `PARKED_RETRY_SECONDS / 60`.
+    """
+    zone = occupied_zone({"201": 60}, (201,))
+    make_device(201, "dimmer", brightness=12, name="Late Strip")
+    commander = RecordingCommander(apply=False)
+    reconciler = Reconciler(commander, EchoBook(), LOG)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        reconciler.run(zone, NOW + TICK)
+        run_passes(reconciler, zone, 20)
+
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    minutes = PARKED_RETRY_SECONDS / 60
+    assert f"{minutes:g} minutes" in message, message

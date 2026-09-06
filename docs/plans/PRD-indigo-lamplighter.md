@@ -239,9 +239,15 @@ actual level is outside the band from desired, sends **one** command and notes
 the pre-command state (R3). No settle poll. The zone is re-checked at the next
 input edge or at the reconcile tick (`reconcile_seconds`, default 60): devices
 still off desired are commanded again, with backoff per device (1, 2, 4, 8
-ticks, capped) and a single warning at the first backoff step naming the
-device and its actual vs desired. A device that later reports at desired
-clears its backoff silently.
+ticks) and a single warning at the first backoff step naming the device and
+its actual vs desired. Once that ladder is walked the device is parked and
+retried every `PARKED_RETRY_SECONDS` (default 600) by the wall clock instead
+of by counting passes, since passes are one counter shared by every zone in
+the house. A device that later reports at desired clears its backoff
+silently, and so does a parked device whose report changes anything at all
+(a link quality counts; an update that changes nothing does not) -- a changed
+report is evidence it is alive again, and the zone is woken to try it at the
+very next pass.
 
 This replaces settle-and-confirm, consecutive-failure counting, suppression,
 recovery scans, writer re-evaluation and the re-evaluation rate limit.

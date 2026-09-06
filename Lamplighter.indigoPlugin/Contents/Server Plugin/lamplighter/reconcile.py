@@ -8,9 +8,20 @@ taken from live state safe, and section 1 removed the decision.
 
 What replaces them is the tick. A device that does not land is still off
 desired at the next pass, so it is commanded again, on a per-device backoff of
-1, 2, 4 and 8 ticks and then at the cap, with one WARNING at the first backoff
-step naming the device, what it reads and what was asked for. A device that
-reports at desired clears its own backoff silently.
+1, 2, 4 and 8 ticks, with one WARNING at the first backoff step naming the
+device, what it reads and what was asked for. Once that ladder is walked the
+device is parked: it is retried by the wall clock (:data:`PARKED_RETRY_SECONDS`)
+rather than by counting passes, because passes are one counter shared by every
+zone in the house and a busy evening can run through eight of them in well
+under a minute -- which is exactly how two Zigbee lights behind a switch that
+is normally off turned into a hundred wasted unicasts an hour. A device that
+reports at desired clears its own backoff silently, and so does a parked
+device that reports *any change at all* -- a link quality, a last-seen, the
+same level it went dark at: a changed report is evidence it is alive again,
+so its ladder is dropped and it is tried again at the very next pass rather
+than waiting out the rest of the parked interval. An update that changes
+nothing (Indigo delivers those too, the echo of our own retry among them) is
+not a report and leaves the device parked.
 
 **PRD section 9 records why, and it is worth repeating here**: if a device
 does not confirm, the answer is the reconcile tick, not a thread. The first
@@ -62,6 +73,18 @@ BACKOFF_TICKS = (1, 2, 4, 8)
 #: Z-Wave or Zigbee device to report back, short enough that a genuinely
 #: ignored command is retried in seconds rather than at the next periodic pass.
 COMMAND_RECHECK_SECONDS = 5.0
+
+#: How often a device is retried once it is past the whole backoff ladder --
+#: commanded more times than ``BACKOFF_TICKS`` has entries. This is wall
+#: clock, not passes: ``passes`` is one counter shared by every zone, so a
+#: house with several zones and the five-second re-check above can run
+#: through the ladder's cap of eight ticks in under a minute, and a device
+#: wedged behind a switch that is normally off gets commanded that often for
+#: as long as the zone wants it. Ten minutes between attempts is long enough
+#: that a device stuck this way stops being the dominant source of Zigbee or
+#: Z-Wave traffic in the house, and short enough that a device that comes
+#: back on its own is not left off desired for long.
+PARKED_RETRY_SECONDS = 600.0
 
 
 def backoff_key(device_id, level):
@@ -131,14 +154,17 @@ class _Backoff:
 
     ``step`` counts commands sent while the device has not landed; ``next_due``
     is the pass number at which it may be commanded again; ``level`` is what
-    those commands were asking for. When the zone starts wanting something
-    else the whole entry is discarded -- it is a record of one target not
-    being reached, and it says nothing about the next one.
+    those commands were asking for. ``not_before`` is set once ``step`` has
+    walked past the whole ladder, and from then on governs retries instead of
+    ``next_due`` -- see :data:`PARKED_RETRY_SECONDS`. When the zone starts
+    wanting something else the whole entry is discarded -- it is a record of
+    one target not being reached, and it says nothing about the next one.
     """
 
     step: int = 0
     next_due: int = 0
     level: object = None
+    not_before: dt.datetime | None = None
 
 
 class Reconciler:
@@ -213,6 +239,13 @@ class Reconciler:
                     f"{this_pass}); not commanded"
                 )
                 continue
+            if backoff is not None and backoff.not_before is not None and backoff.not_before > now:
+                self.logger.debug(
+                    f"{zone.name}: {device.name} is off desired={level!r} but is "
+                    f"parked until {backoff.not_before.isoformat()} (wall clock; "
+                    f"this pass is at {now.isoformat()}); not commanded"
+                )
+                continue
 
             actual = self._actual(device) if readable else None
             if backoff is not None and backoff.step >= 1:
@@ -231,7 +264,7 @@ class Reconciler:
 
             self.commander.set_level(device, level)
             zone.writes_today += 1
-            step = self._advance_backoff(device_id, this_pass, level)
+            step = self._advance_backoff(device_id, this_pass, now, level)
             sent.append(
                 Command(
                     zone=zone.name,
@@ -265,6 +298,18 @@ class Reconciler:
         backoff = self._backoff.get(device_id)
         return backoff.next_due if backoff else None
 
+    def is_parked(self, device_id) -> bool:
+        """Past the whole ladder, so only retried by the wall clock.
+
+        Read by the engine (:meth:`Engine._light_changed`): any report from a
+        parked device is evidence it is alive again, which is not true of a
+        device still partway up the ladder -- a ramping dimmer reports every
+        intermediate level on its own, and un-parking it there would turn the
+        ladder into a command storm.
+        """
+        backoff = self._backoff.get(device_id)
+        return backoff is not None and backoff.step > len(BACKOFF_TICKS)
+
     def forget(self, device_id=None) -> None:
         """Drop one device's backoff, or all of it (a config reload)."""
         if device_id is None:
@@ -274,7 +319,7 @@ class Reconciler:
         else:
             self._clear_backoff(device_id)
 
-    def _advance_backoff(self, device_id, this_pass, level) -> int:
+    def _advance_backoff(self, device_id, this_pass, now, level) -> int:
         backoff = self._backoff.get(device_id)
         if backoff is None:
             backoff = _Backoff()
@@ -283,6 +328,12 @@ class Reconciler:
         backoff.step += 1
         backoff.next_due = this_pass + delay
         backoff.level = level
+        if backoff.step > len(BACKOFF_TICKS):
+            # The whole ladder has been walked. From here the pass-counted
+            # `next_due` above is academic -- passes are one counter shared
+            # by every zone, so it can be reached in seconds -- and
+            # `not_before` is what actually governs the next retry.
+            backoff.not_before = now + dt.timedelta(seconds=PARKED_RETRY_SECONDS)
         return backoff.step
 
     def _clear_backoff(self, device_id) -> None:
@@ -304,15 +355,19 @@ class Reconciler:
     # ------------------------------------------------------------ the warnings
 
     def _warn_backoff(self, zone, device, actual, level, step) -> None:
+        parked_minutes = PARKED_RETRY_SECONDS / 60
         compare.warn_once(
             self.logger,
             backoff_key(device.id, level),
             f"{zone.name}: {device.name} ({device.id}) did not reach its desired "
             f"level. It reads {actual!r} and the zone wants {level!r}, so it is "
             f"being commanded again on a backoff of "
-            f"{'/'.join(str(tick) for tick in BACKOFF_TICKS)} ticks. This is not "
-            "a device the plugin has given up on -- it keeps being commanded at "
-            "the cap -- but it is one worth looking at.",
+            f"{'/'.join(str(tick) for tick in BACKOFF_TICKS)} ticks and, once "
+            f"that ladder is walked, every {parked_minutes:g} minutes after "
+            "that by the wall clock. This is not a device the plugin has given "
+            "up on -- it is one worth looking at -- and any change in what it "
+            "reports, even one still off desired, brings the next attempt "
+            "forward to right away.",
         )
 
     def _warn_unreadable(self, zone, device, exc) -> None:

@@ -98,6 +98,22 @@ def presence_reading(device) -> tuple:
     )
 
 
+def light_reported(previous_dev, current_dev) -> bool:
+    """Whether this update carries any change at all in what the device says.
+
+    Not just the brightness: a light coming back to power often reports the
+    same level it went dark at, and the only thing that moves is a link
+    quality or last-seen state. Any difference between the two snapshots'
+    states counts; none, or no before-snapshot to compare with, does not.
+    """
+    if previous_dev is None:
+        return False
+    try:
+        return dict(previous_dev.states) != dict(current_dev.states)
+    except (AttributeError, TypeError):
+        return False
+
+
 def presence_is_on(device) -> bool:
     """Is this presence device reporting? Any of the three readings, any-of.
 
@@ -195,6 +211,19 @@ class Engine:
 
     def _light_changed(self, zone, previous_dev, current_dev, now):
         """The override rule, on the event, before anything can revert it (R1)."""
+        device_id = current_dev.id
+        if self.reconciler.is_parked(device_id) and light_reported(previous_dev, current_dev):
+            # A parked device (reconcile.py) is only retried on the wall
+            # clock; a report from it that changes anything it says, however
+            # it reads, is evidence it is alive again. Drop its ladder and
+            # bring the zone's wake forward to now, independently of whatever
+            # the override rule below makes of the same event. The gate
+            # matters: Indigo also delivers this callback for updates that
+            # change nothing -- the echo of the plugin's own retry among them
+            # -- and un-parking on those would put the device straight back
+            # on the ladder it was parked to escape.
+            self.reconciler.forget(device_id)
+            self._wakes[zone.name] = now
         if not is_manual_override(
             zone,
             previous_dev,
@@ -205,7 +234,6 @@ class Engine:
             self.logger,
         ):
             return None
-        device_id = current_dev.id
         if zone.start_override(device_id, now) is None:
             # A never-lock zone noticed the change and keeps its levels.
             return None

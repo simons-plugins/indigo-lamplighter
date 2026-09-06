@@ -944,3 +944,135 @@ def test_the_hallway_false_warning_does_not_come_back(caplog):
         "the lamp did what it was told twice and was called broken: "
         + "; ".join(r.getMessage() for r in misses(caplog))
     )
+
+
+# ------------------------------------------------------- parked, then reported
+#
+# A device wedged behind a switch that is normally off (the Dining Room)
+# walks the whole backoff ladder and is then parked (reconcile.py). Any
+# report from it afterwards -- even one that is still off desired -- is
+# evidence it is alive again, so its ladder is dropped and the zone is woken
+# to try again at once, rather than waiting out the rest of the parked
+# interval. A device still partway up the ladder must not get this treatment,
+# or a ramping dimmer reporting its own intermediate levels would restart its
+# ladder on every report.
+
+
+def test_a_parked_device_that_reports_is_commanded_at_the_next_pass():
+    """A parked device that reports anything is un-parked and commanded at
+    the very next pass.
+
+    Kills: engine.Engine._light_changed's `self.reconciler.forget(device_id)`
+    (and the wake brought forward beside it) deleted.
+    """
+    commander = RecordingCommander(apply=False)  # 201 never lands on its own
+    engine, zone, clock, _changed = build(
+        commander,
+        lights=[201],
+        hold_seconds=1200,
+        periods=[make_period("Evening", "18:00", "23:00", levels={"201": 60})],
+    )
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0, name="Dining Room Strip")
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)  # pass 1: the first command, never warns
+
+    # Passes 2 through 16, a minute apart: the ladder (1, 2, 4, 8) and one
+    # more command past it, which is what parks the device.
+    for number in range(1, 16):
+        engine.tick(clock.at(seconds=60 * number))
+
+    assert engine.reconciler.backoff_step(201) == 5, "one command past the whole ladder"
+    assert engine.reconciler.is_parked(201) is True
+
+    # It reports -- still off desired (0 -> 100, not the desired 60), so this
+    # is not an override transition (was_at_desired is False either way,
+    # since neither 0 nor 100 is 60) -- but it is evidence the device itself
+    # is alive again.
+    apply_level(make_device(201, "dimmer", brightness=100, name="Dining Room Strip"), 100)
+    now = clock.at(seconds=60 * 15 + 30)
+    engine.device_updated(*light(201, 0, 100, name="Dining Room Strip"), now)
+
+    assert engine.reconciler.backoff_step(201) == 0, "the ladder was dropped"
+    assert engine.next_wake(now) <= now, "the zone was woken to try again at once"
+
+    commander.clear()
+    summary = engine.tick(now)
+    assert [command.device_id for command in summary.commands] == [201], (
+        "the un-parked device was commanded at the very next pass"
+    )
+
+
+def test_a_report_from_a_device_still_on_the_ladder_keeps_its_ladder():
+    """A device only partway up the ladder is not parked, so a report from
+    it -- even one still off desired -- must not restart its ladder: a
+    ramping dimmer reports an intermediate level on every step, and
+    un-parking it there would turn the ladder into a command storm.
+
+    Kills: engine.Engine._light_changed un-parking unconditionally, without
+    first checking `self.reconciler.is_parked(device_id)`.
+    """
+    commander = RecordingCommander(apply=False)
+    engine, zone, clock, _changed = build(
+        commander,
+        lights=[201],
+        hold_seconds=1200,
+        periods=[make_period("Evening", "18:00", "23:00", levels={"201": 60})],
+    )
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0, name="Ramping Dimmer")
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)  # pass 1
+    engine.tick(clock.at(seconds=60))  # pass 2
+
+    assert engine.reconciler.backoff_step(201) == 2, "two un-landed commands"
+    assert engine.reconciler.is_parked(201) is False
+
+    now = clock.at(seconds=90)
+    engine.device_updated(*light(201, 0, 30, name="Ramping Dimmer"), now)
+
+    assert engine.reconciler.backoff_step(201) == 2, (
+        "a report from a device still on the ladder reset it, which turns a "
+        "ramp reporting its own intermediate levels into a command storm"
+    )
+
+
+def test_a_no_change_update_from_a_parked_device_does_not_unpark_it():
+    """An update that changes nothing the device reports is not a report:
+    Indigo delivers deviceUpdated for the echo of the plugin's own retry
+    among other no-change updates, and un-parking on those would put the
+    device straight back on the ladder every ten minutes.
+
+    Kills: engine.Engine._light_changed's `and light_reported(previous_dev,
+    current_dev)` gate deleted.
+    """
+    commander = RecordingCommander(apply=False)
+    engine, zone, clock, _changed = build(
+        commander,
+        lights=[201],
+        hold_seconds=1200,
+        periods=[make_period("Evening", "18:00", "23:00", levels={"201": 60})],
+    )
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0, name="Dining Room Strip")
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    for number in range(0, 16):
+        engine.tick(clock.at(seconds=60 * number))
+    assert engine.reconciler.is_parked(201) is True
+
+    now = clock.at(seconds=60 * 15 + 30)
+    wake_before = engine.next_wake(now)
+    engine.device_updated(*light(201, 0, 0, name="Dining Room Strip"), now)
+
+    assert engine.reconciler.is_parked(201) is True, (
+        "a no-change update un-parked the device; the echo of its own retry "
+        "would now restart the ladder every parked interval"
+    )
+    assert engine.reconciler.backoff_step(201) == 5
+    assert engine.next_wake(now) == wake_before, "the zone was not woken for nothing"
