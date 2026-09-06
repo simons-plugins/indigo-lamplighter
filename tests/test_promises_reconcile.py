@@ -26,7 +26,12 @@ from helpers import (
 
 from lamplighter import compare
 from lamplighter.override import EchoBook, is_manual_override
-from lamplighter.reconcile import BACKOFF_TICKS, PARKED_RETRY_SECONDS, Reconciler
+from lamplighter.reconcile import (
+    BACKOFF_TICKS,
+    COMMAND_RECHECK_SECONDS,
+    PARKED_RETRY_SECONDS,
+    Reconciler,
+)
 from lamplighter.zone import ZoneState
 
 NOW = dt.datetime(2026, 9, 4, 20, 0, 0)
@@ -516,3 +521,87 @@ def test_the_backoff_warning_names_the_parked_cadence(caplog):
     message = caplog.records[0].getMessage()
     minutes = PARKED_RETRY_SECONDS / 60
     assert f"{minutes:g} minutes" in message, message
+
+
+# --------------------------------------------------------- the in-flight gate
+#
+# The live defect: the reconciler commanded five Kitchen lights, and 1.25 s
+# later an input edge -- a second presence sensor tripping a second after the
+# first -- ran a second pass for the same zone. Two Zigbee devices had not yet
+# reported (their reports landed a moment later, well inside the module
+# docstring's own five-second re-check), and because the pass judged them the
+# instant `next_due` was reached -- the very next pass, on the first backoff
+# step -- it warned "did not reach its desired level" and re-sent both
+# commands. Both the warning and the resend were wrong: the devices were
+# simply in flight.
+
+
+def test_a_pass_inside_the_recheck_window_neither_judges_nor_recommands_a_device_in_flight(caplog):
+    """A pass that runs sooner than ``COMMAND_RECHECK_SECONDS`` after a
+    command -- from another zone's own wake, or an input edge such as the
+    room's own lux sensor reacting to the lights coming on -- leaves a
+    commanded device alone: it is in flight, not failed, so it is neither
+    re-commanded nor warned about until the recheck is actually due.
+
+    Kills: reconcile.Reconciler.run's in-flight gate (`now - backoff.sent_at
+    < COMMAND_RECHECK_SECONDS`) deleted.
+    """
+    zone = occupied_zone({"201": 60}, (201,))
+    make_device(201, "dimmer", brightness=0, name="In Flight")
+    commander = RecordingCommander(apply=False)  # never lands on its own
+    reconciler = Reconciler(commander, EchoBook(), LOG)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        sent = reconciler.run(zone, NOW)
+        assert [command.level for command in sent] == [60], "precondition: commanded"
+
+        for offset in (1, 2, 4.9):
+            more = reconciler.run(zone, NOW + dt.timedelta(seconds=offset))
+            assert more == [], f"recommanded {offset} s after the first command"
+        assert caplog.records == [], "a device still in flight was warned about"
+
+        sent = reconciler.run(zone, NOW + dt.timedelta(seconds=COMMAND_RECHECK_SECONDS))
+
+    assert [command.level for command in sent] == [60], "the scheduled re-check fires"
+    assert len(caplog.records) == 1, "exactly one warning, at the re-check and not before"
+
+
+def test_a_new_target_inside_the_recheck_window_is_still_commanded_at_once(caplog):
+    """A change of target inside the five-second in-flight window is still a
+    first command, sent at once: the in-flight gate must not hold a brand new
+    target hostage to a stale entry about the level the zone no longer wants.
+
+    Kills: the in-flight gate placed BEFORE the target-change block in run()
+    (i.e. gating on the stale entry before it is discarded).
+    """
+    boundary = dt.datetime(2026, 9, 4, 20, 0, 0)
+    before = boundary - dt.timedelta(seconds=1)
+    zone = make_zone(
+        [
+            make_period("Evening", "19:00", "20:00", levels={"201": 40}),
+            make_period("Night", "20:00", "23:00", levels={"201": 90}),
+        ],
+        logger=LOG,
+        lights=[201],
+        presence_devices=[101],
+    )
+    zone.ingest_presence(101, True, before)
+    assert zone.evaluate(before, "startup").to_state is ZoneState.OCCUPIED
+    assert zone.desired_levels(before)[201] == 40
+    assert zone.desired_levels(boundary)[201] == 90, "sanity: the boundary changes the target"
+
+    make_device(201, "dimmer", brightness=0)
+    reconciler = Reconciler(RecordingCommander(apply=False), EchoBook(), LOG)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        sent = reconciler.run(zone, before)
+        assert [command.level for command in sent] == [40], "precondition: commanded"
+
+        sent = reconciler.run(zone, boundary)
+
+    assert [command.level for command in sent] == [90], (
+        "a new target queued behind the in-flight gate instead of being "
+        "commanded at once"
+    )
+    assert sent[0].backoff_step == 1, "a first attempt at a new target, not a retry"
+    assert caplog.records == [], "a first attempt at any target never warns"

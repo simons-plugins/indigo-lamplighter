@@ -49,6 +49,14 @@ worker pass does the looking. It buys the thing the periodic tick could not:
 a device that genuinely ignored a command is re-sent in about five seconds
 rather than up to a full reconcile interval, and a device that simply had not
 reported yet clears silently at the same moment instead of being warned about.
+
+The five seconds is also a floor, not just a schedule. A pass can run sooner
+for a reason that has nothing to do with the command just sent -- another
+zone's own wake, an input edge such as the room's own lux sensor reacting to
+the lights coming on -- and such a pass leaves a device commanded within the
+window alone: it is in flight, not failed, and is neither re-commanded nor
+warned about. Only a pass at or after the five seconds is entitled to judge
+it, whatever woke the zone.
 """
 
 from __future__ import annotations
@@ -165,6 +173,7 @@ class _Backoff:
     next_due: int = 0
     level: object = None
     not_before: dt.datetime | None = None
+    sent_at: dt.datetime | None = None
 
 
 class Reconciler:
@@ -232,6 +241,17 @@ class Reconciler:
                 # when that command was sent.
                 self._clear_backoff(device_id)
                 backoff = None
+            if (
+                backoff is not None
+                and backoff.sent_at is not None
+                and (now - backoff.sent_at) < dt.timedelta(seconds=COMMAND_RECHECK_SECONDS)
+            ):
+                elapsed = (now - backoff.sent_at).total_seconds()
+                self.logger.debug(
+                    f"{zone.name}: {device.name} was commanded {elapsed:.1f} s "
+                    "ago and is still in flight; not judged"
+                )
+                continue
             if backoff is not None and backoff.next_due > this_pass:
                 self.logger.debug(
                     f"{zone.name}: {device.name} is off desired={level!r} but is "
@@ -328,6 +348,7 @@ class Reconciler:
         backoff.step += 1
         backoff.next_due = this_pass + delay
         backoff.level = level
+        backoff.sent_at = now
         if backoff.step > len(BACKOFF_TICKS):
             # The whole ladder has been walked. From here the pass-counted
             # `next_due` above is academic -- passes are one counter shared
