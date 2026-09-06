@@ -78,7 +78,7 @@ fix, with the evidence. These are the acceptance criteria, not background.
 | R9 | Lux gating is a Schmitt trigger: the band applies only when leaving dark, and must be wider than the zone's own lights add at the sensor. | Kitchen sensor is in the kitchen; +100..200 lux from the lights. |
 | R10 | Locks: duration, extend-while-active, unlock-on-leave (from the zone's own presence hold, so it works for locks created while occupied), per-zone "never lock", per-device exclusion. | Fork #17: unlock-on-leave only armed when the lock was created with the room already empty. |
 | R11 | Periods are sunset/sunrise-relative when asked, may cross midnight, and must not overlap (validation error, not first-match-wins). | Kitchen "Dusk" band is a fixed 16:00–19:00 approximation; Garden needs two hard-off bands to express one. |
-| R12 | Per-device level per period: an int 1–100, `on`, `off` (force off), or `leave` (don't touch). "Leave" plus force-off must not be two settings that only work in one combination. | Fork `device_period_map` false + `off_lights_behavior` pairing. |
+| R12 | Per-device level per period: an int 1–100, `on`, `off` (force off), or `leave` (don't touch). "Leave" plus force-off must not be two settings that only work in one combination. A period may carry `vacant_levels`; absent means off when vacant (unchanged). | Fork `device_period_map` false + `off_lights_behavior` pairing. |
 | R13 | State (lock expiry, override device, presence last-seen, counters) is persisted on the zone device and restored on startup. | Every fork reload: "all locks and zone state has been reset". |
 | R14 | Log the real trigger of a re-plan, and publish per-zone counters. | Fork's "Triggered by" is the most recently changed sensor, not the cause. |
 | R15 | Every degradation path says so: unreadable sensor, missing device, stale lux, unparseable config. No quiet zero. | Workspace convention; fork's `_luminance_unreadable_warned` pattern. |
@@ -208,6 +208,18 @@ device in that period, in any state; `off` means it is turned off in VACANT
 `adjust_by_lux: true` on a zone that has a lux block, with a message saying
 so, rather than letting a runtime path raise. `hold_seconds: 0` means
 presence is never active (the zone behaves as off-only).
+
+A period may also carry `vacant_levels`, the same shape as `levels`, for the
+lights that should not simply go dark when the room is empty -- a porch light
+at 25% all evening, jumping to 100% on motion and dropping back to 25% when
+the hold lapses, rather than off. A light absent from `vacant_levels` still
+goes off when vacant, exactly as before this key existed; a light present
+here must also have a non-`leave` level in `levels` (the loader refuses
+otherwise -- a vacant level for a light the period does not manage is a
+mistake, not a default), and its value is mapped exactly as an occupied level
+is (capped by `limit`, `"leave"` meaning "don't write it"). `bright` (OFF-DUTY)
+still turns every one of these lights off outright, regardless of the
+period's mode: daylight makes the light unnecessary, dim level included.
 
 ### 5.7 Override detection
 

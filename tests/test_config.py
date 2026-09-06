@@ -227,6 +227,63 @@ def test_a_levels_key_must_be_one_of_the_zones_lights():
     assert "999" in str(caught.value)
 
 
+def test_a_vacant_level_for_a_light_without_an_occupied_level_is_refused():
+    """A vacant level for a light this period does not manage while occupied
+    is a mistake, not a default (R12).
+
+    Kills: dropping the cross-check between `vacant_levels` and `levels`.
+    """
+    with pytest.raises(ConfigError) as caught:
+        load(
+            periods=[
+                {
+                    "name": "Evening",
+                    "from": "19:00",
+                    "to": "23:00",
+                    "mode": "on_and_off",
+                    "levels": {"201": 60, "202": "leave"},
+                    "vacant_levels": {"202": 25},
+                }
+            ]
+        )
+    assert caught.value.path == "zones/0/periods/0/vacant_levels/202"
+    assert "202" in str(caught.value)
+
+
+def test_a_vacant_level_that_turns_a_light_on_in_an_off_only_period_is_refused():
+    """`off_only` never turns a light on, and a vacant level of an int or
+    "on" would (R11, R12).
+
+    Kills: dropping the off_only rule for vacant_levels.
+    """
+    with pytest.raises(ConfigError) as caught:
+        load(
+            periods=[
+                {
+                    "name": "Overnight",
+                    "from": "22:00",
+                    "to": "06:00",
+                    "mode": "off_only",
+                    "levels": {"201": 60, "202": "leave"},
+                    "vacant_levels": {"201": 25},
+                }
+            ]
+        )
+    assert caught.value.path == "zones/0/periods/0/vacant_levels/201"
+    assert "off_only" in str(caught.value)
+
+
+def test_a_period_without_vacant_levels_loads_exactly_as_before():
+    """The common case: no `vacant_levels` key at all.
+
+    Kills: a default other than the empty mapping, which would change
+    `_vacant_plan`'s behaviour for every period written before this key
+    existed.
+    """
+    period = load().zones[0].periods[0]
+    assert period.vacant_levels == {}
+
+
 def test_an_unknown_device_id_is_not_a_configuration_error():
     """Ids are not resolved at load time (R15).
 

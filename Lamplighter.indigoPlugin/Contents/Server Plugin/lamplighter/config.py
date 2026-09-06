@@ -75,7 +75,7 @@ _ZONE_OVERRIDE_KEYS = (
     "exclude",
 )
 _PERIOD_REQUIRED = ("name", "from", "to", "mode", "levels")
-_PERIOD_KEYS = _PERIOD_REQUIRED + ("limit", "adjust_by_lux", "override")
+_PERIOD_KEYS = _PERIOD_REQUIRED + ("vacant_levels", "limit", "adjust_by_lux", "override")
 _PERIOD_OVERRIDE_KEYS = ("duration_minutes", "extend_minutes")
 _MODES = ("on_and_off", "off_only")
 _WHEN_UNREADABLE = ("dark", "bright")
@@ -302,6 +302,40 @@ def _levels(raw, path, lights):
     return levels
 
 
+def _vacant_levels(raw, path, lights, levels, mode):
+    """The per-device VACANT-only levels of one period, optional (R12).
+
+    Same shape and same three rules as ``_levels``, plus two more the
+    schema cannot express: every key must also have a non-"leave" level in
+    this period's ``levels`` -- a vacant level for a light the period does
+    not manage while occupied is a mistake, not a default -- and in an
+    ``off_only`` period a vacant level may not turn a light on, because that
+    mode never turns a light on and an int or "on" here would.
+    """
+    if isinstance(raw, dict) and not raw:
+        _fail(path, "is empty; omit vacant_levels entirely rather than listing none")
+
+    vacant = _levels(raw, path, lights)
+    for device_id, level in vacant.items():
+        where = f"{path}/{device_id}"
+        if levels.get(device_id, "leave") == "leave":
+            _fail(
+                where,
+                f"{device_id} has a vacant level but no level in this period's "
+                "'levels' (or 'leave' there); a vacant level for a light this "
+                "period does not manage while occupied is a mistake, not a "
+                "default",
+            )
+        if mode == "off_only" and (isinstance(level, int) or level == "on"):
+            _fail(
+                where,
+                f"{level!r} would turn light {device_id} on while vacant, but "
+                "this period's mode is 'off_only', which never turns a light on "
+                "-- 'off' or 'leave' are the only vacant levels off_only allows",
+            )
+    return vacant
+
+
 def _adjust_by_lux(raw, path, has_lux):
     """The lux-scaling flag, which this version refuses to pretend it honours.
 
@@ -341,11 +375,19 @@ def _period_override(raw, path):
 
 def _period(raw, path, lights, has_lux):
     _object(raw, path, required=_PERIOD_REQUIRED, allowed=_PERIOD_KEYS)
+    mode = _string(raw["mode"], f"{path}/mode", choices=_MODES)
+    levels = _levels(raw["levels"], f"{path}/levels", lights)
     return Period(
         name=_string(raw["name"], f"{path}/name", max_length=64),
         start=_time_expr(raw["from"], f"{path}/from"),
         end=_time_expr(raw["to"], f"{path}/to"),
-        mode=_string(raw["mode"], f"{path}/mode", choices=_MODES),
+        mode=mode,
+        levels=levels,
+        vacant_levels=(
+            {}
+            if "vacant_levels" not in raw
+            else _vacant_levels(raw["vacant_levels"], f"{path}/vacant_levels", lights, levels, mode)
+        ),
         limit=(
             None
             if "limit" not in raw
@@ -355,7 +397,6 @@ def _period(raw, path, lights, has_lux):
         override=(
             None if "override" not in raw else _period_override(raw["override"], f"{path}/override")
         ),
-        levels=_levels(raw["levels"], f"{path}/levels", lights),
     )
 
 

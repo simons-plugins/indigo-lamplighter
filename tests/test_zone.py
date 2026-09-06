@@ -418,6 +418,67 @@ def test_vacant_turns_off_every_light_with_a_level():
     assert zone.desired_levels(NOW) == {201: "off", 202: "leave"}
 
 
+def test_vacant_uses_the_period_vacant_levels_and_off_for_the_rest():
+    """A porch light dims rather than goes dark; a light with no
+    `vacant_levels` entry still goes off, exactly as before (R12).
+
+    Kills: the VACANT branch still calling `_all_off`, which ignores
+    `vacant_levels` entirely.
+    """
+    zone = two_light_zone(
+        [evening(levels={"201": 60, "202": 30}, vacant_levels={"201": 25})]
+    )
+    zone.ingest_lux(1800, NOW)
+    zone.evaluate(NOW, "lux edge")
+    assert zone.desired_levels(NOW) == {201: 25, 202: "off"}
+
+
+def test_a_vacant_level_is_capped_by_the_period_limit():
+    """The period's `limit` applies to a vacant level exactly as it applies
+    to an occupied one (R12, section 5.6).
+
+    Kills: forgetting to run a vacant level through `_capped`.
+    """
+    zone = two_light_zone(
+        [evening(levels={"201": 60, "202": "leave"}, vacant_levels={"201": 80}, limit=60)]
+    )
+    zone.ingest_lux(1800, NOW)
+    zone.evaluate(NOW, "lux edge")
+    assert zone.desired_levels(NOW) == {201: 60, 202: "leave"}
+
+
+def test_bright_off_duty_ignores_vacant_levels_and_turns_everything_off():
+    """`bright` is not VACANT's plan any more, and it must not become one:
+    daylight makes the lights unnecessary outright, dim level included
+    (section 5.3, decided 2026-09-04).
+
+    Kills: routing OFF-DUTY's `bright` cause through `_vacant_plan` instead
+    of `_all_off`.
+    """
+    zone = occupy(
+        two_light_zone([evening(levels={"201": 60, "202": "leave"}, vacant_levels={"201": 25})])
+    )
+    zone.ingest_lux(2500, at(minutes=1))
+    assert zone.evaluate(at(minutes=1), "lux edge").to_state is ZoneState.OFF_DUTY
+    assert zone.off_duty_cause == "bright"
+    assert zone.desired_levels(at(minutes=1)) == {201: "off", 202: "leave"}
+
+
+def test_a_leave_vacant_level_is_not_written_when_vacant():
+    """`vacant_levels: "leave"` means the plugin does not write this device
+    when vacant, the same guarantee `levels: "leave"` gives in any state
+    (R12).
+
+    Kills: mapping a "leave" vacant level to off.
+    """
+    zone = two_light_zone(
+        [evening(levels={"201": 100, "202": "leave"}, vacant_levels={"201": "leave"})]
+    )
+    zone.ingest_lux(1800, NOW)
+    zone.evaluate(NOW, "lux edge")
+    assert zone.desired_levels(NOW) == {201: "leave", 202: "leave"}
+
+
 def test_occupied_is_the_periods_levels():
     zone = occupy(two_light_zone())
     assert zone.desired_levels(NOW) == {201: 60, 202: 30}

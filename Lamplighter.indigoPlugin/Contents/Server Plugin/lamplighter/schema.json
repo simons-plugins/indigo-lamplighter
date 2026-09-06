@@ -208,6 +208,16 @@
           },
           "additionalProperties": { "$ref": "#/$defs/level" },
           "description": "What each light does in this period, keyed by device id as a string (R12). A light in the zone's 'lights' that is ABSENT from this object is treated as 'leave': the plugin does not write it during this period. Listing it with 'leave' means the same thing and documents the intent; listing it with 'off' is different -- that forces it off."
+        },
+        "vacant_levels": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[1-9][0-9]*$",
+            "description": "An Indigo device id written as a string, because JSON object keys are strings. Every key must also appear in this period's 'levels' with a level other than 'leave' -- the loader rejects a key that does not, naming it, because a vacant level for a light this period does not manage is a mistake, not a default."
+          },
+          "additionalProperties": { "$ref": "#/$defs/level" },
+          "description": "What each light does in this period when the room is VACANT, keyed by device id as a string (optional; R12). A light ABSENT from this object goes off when vacant, exactly as it always has. 'leave' here means the plugin does not write this device when vacant. This is how a porch light sits dimmed all evening instead of going dark: give it a level in 'levels' for when the room is occupied and a lower one here for when it is not."
         }
       }
     },

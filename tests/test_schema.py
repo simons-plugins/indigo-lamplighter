@@ -87,6 +87,32 @@ def test_example_exercises_the_shapes_the_prd_calls_out():
     assert set(hall_periods["Evening"]["levels"].values()) == {"on"}, "relay level"
 
 
+def test_vacant_levels_is_accepted_with_the_same_shape_as_levels():
+    """A porch light: 25 while vacant, 100 while occupied (R12).
+
+    Kills: a schema edit that forgot to add `vacant_levels` to a period's
+    `properties`, which would make this fail on `additionalProperties`
+    instead of validating.
+    """
+    doc = copy.deepcopy(EXAMPLE)
+    period = doc["zones"][0]["periods"][0]
+    period["vacant_levels"] = {"1894385558": 25}
+    assert _errors(doc) == []
+
+
+def test_vacant_levels_rejects_a_bad_level_word():
+    """`vacant_levels` values are levels, not free text (R12).
+
+    Kills: a `vacant_levels` schema that forgot to `$ref` the shared `level`
+    def and so accepted any string.
+    """
+    doc = copy.deepcopy(EXAMPLE)
+    period = doc["zones"][0]["periods"][0]
+    period["vacant_levels"] = {"1894385558": "dim"}
+    errors = _errors(doc)
+    assert errors, "'dim' is not one of the level words the schema allows"
+
+
 # ------------------------------------------------------- invalid documents
 #
 # Each mutation returns the path the resulting error must carry. Errors are

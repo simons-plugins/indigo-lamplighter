@@ -21,14 +21,17 @@ The state machine itself is small enough to read in one sitting:
 
 * **OFF-DUTY** -- no active period, or the room is bright, or the plugin or
   zone is disabled. What it writes depends on **which** of those is true
-  (section 5.3, decided 2026-09-04): ``bright`` behaves exactly like VACANT,
-  because daylight makes the lights unnecessary and this house relies on them
-  going off when a room brightens; ``no_period`` and ``disabled`` write
-  nothing at all, because the plugin has no opinion about a time it was not
-  configured for or a zone it was told to leave alone. :attr:`Zone.off_duty_cause`
-  says which, and so does the explain line.
-* **VACANT** -- on duty, nobody here: every light with a level goes off, and
-  a light set to ``leave`` is not touched.
+  (section 5.3, decided 2026-09-04): ``bright`` turns off every light with a
+  level in this period, ``vacant_levels`` included, because daylight makes
+  the lights unnecessary outright and this house relies on them going off
+  when a room brightens; ``no_period`` and ``disabled`` write nothing at all,
+  because the plugin has no opinion about a time it was not configured for
+  or a zone it was told to leave alone. :attr:`Zone.off_duty_cause` says
+  which, and so does the explain line.
+* **VACANT** -- on duty, nobody here: every light with a level goes to its
+  period's ``vacant_levels`` entry, or off if it has none; a light set to
+  ``leave`` (in ``levels``, or in ``vacant_levels`` for one that has a level)
+  is not touched.
 * **OCCUPIED** -- on duty, somebody here: the period's levels, capped by
   ``limit``.
 * **OVERRIDDEN** -- a person has taken over. Desired is ``leave`` for
@@ -686,7 +689,7 @@ class Zone:
             return plan
 
         if state is ZoneState.VACANT:
-            return self._all_off(period, plan)
+            return self._vacant_plan(period, plan)
 
         # OCCUPIED.
         if period.mode == "off_only":
@@ -719,10 +722,36 @@ class Zone:
         return plan
 
     def _all_off(self, period, plan) -> dict:
-        """Off for every light with a level; ``leave`` devices untouched."""
+        """Off for every light with a level; ``leave`` devices untouched.
+
+        Used only for OFF-DUTY's ``bright`` cause, which is deliberately not
+        :meth:`_vacant_plan`: daylight makes the lights unnecessary outright,
+        dim level included, whether or not the room later empties on its own.
+        """
         for light in self.config.lights:
             if period.levels.get(light, LEAVE) != LEAVE:
                 plan[light] = OFF
+        return plan
+
+    def _vacant_plan(self, period, plan) -> dict:
+        """The VACANT plan, honouring the period's ``vacant_levels`` (R12).
+
+        Only lights with a non-``leave`` level in ``levels`` are touched at
+        all -- a light this period does not manage while occupied is not
+        managed while vacant either. For each of those, the desired level is
+        the light's ``vacant_levels`` entry, mapped exactly as an occupied
+        level is (an int capped by the period's ``limit``, ``on`` becomes the
+        capped level, ``off`` forces off, ``leave`` leaves it alone); a light
+        absent from ``vacant_levels`` goes off, exactly as before this key
+        existed.
+        """
+        for light in self.config.lights:
+            if period.levels.get(light, LEAVE) == LEAVE:
+                continue
+            vacant_level = period.vacant_levels.get(light, OFF)
+            if vacant_level == LEAVE:
+                continue
+            plan[light] = OFF if vacant_level == OFF else _capped(vacant_level, period.limit)
         return plan
 
     def desired_summary(self, now: dt.datetime) -> str:

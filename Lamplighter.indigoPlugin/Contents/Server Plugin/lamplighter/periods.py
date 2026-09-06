@@ -213,6 +213,13 @@ class Period:
     of the zone that is absent from ``levels`` is left alone, exactly as if
     it were written as "leave".
 
+    ``vacant_levels`` is the same shape, optional, and gives a light that has
+    a level in ``levels`` a different level for when the room is VACANT
+    instead of the off it would otherwise get -- a porch light that dims
+    rather than goes dark. A key here always has a matching, non-"leave" key
+    in ``levels``: the loader refuses a ``vacant_levels`` entry for a light
+    this period does not manage while occupied.
+
     ``override`` is a ``config.PeriodOverride`` or None, typed loosely here
     only to keep this module below the loader in the import order.
     """
@@ -222,6 +229,7 @@ class Period:
     end: TimeExpr
     mode: str
     levels: Mapping[int, Any] = field(default_factory=dict)
+    vacant_levels: Mapping[int, Any] = field(default_factory=dict)
     limit: int | None = None
     adjust_by_lux: bool = False
     override: Any = None
