@@ -80,7 +80,11 @@ BACKOFF_TICKS = (1, 2, 4, 8)
 #: is still no poll, no sleep and no thread (PRD section 9). Long enough for a
 #: Z-Wave or Zigbee device to report back, short enough that a genuinely
 #: ignored command is retried in seconds rather than at the next periodic pass.
-COMMAND_RECHECK_SECONDS = 5.0
+#: Fifteen, not five: Indigo's Z-Wave plugin serialises its sends, and four
+#: outdoor garden nodes commanded together took eight seconds just to get on
+#: the air -- a five-second re-check judged three of them before their
+#: commands had been transmitted and queued duplicates behind them.
+COMMAND_RECHECK_SECONDS = 15.0
 
 #: How often a device is retried once it is past the whole backoff ladder --
 #: commanded more times than ``BACKOFF_TICKS`` has entries. This is wall

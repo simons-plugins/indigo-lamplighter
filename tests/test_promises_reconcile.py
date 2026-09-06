@@ -555,7 +555,7 @@ def test_a_pass_inside_the_recheck_window_neither_judges_nor_recommands_a_device
         sent = reconciler.run(zone, NOW)
         assert [command.level for command in sent] == [60], "precondition: commanded"
 
-        for offset in (1, 2, 4.9):
+        for offset in (1, 2, COMMAND_RECHECK_SECONDS - 0.1):
             more = reconciler.run(zone, NOW + dt.timedelta(seconds=offset))
             assert more == [], f"recommanded {offset} s after the first command"
         assert caplog.records == [], "a device still in flight was warned about"
