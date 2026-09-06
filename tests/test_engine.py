@@ -1192,3 +1192,41 @@ def test_a_no_change_update_from_a_parked_device_does_not_unpark_it():
     )
     assert engine.reconciler.backoff_step(201) == 5
     assert engine.next_wake(now) == wake_before, "the zone was not woken for nothing"
+
+
+def test_a_reload_that_moves_no_zone_still_republishes_it():
+    """An evaluation publishes the zone even when its state does not change.
+
+    Live 2026-09-06 20:37: a config reload published every rebuilt zone
+    before the worker evaluated it, and the Bedroom and Kitchen -- which
+    landed in the same state they were already in -- kept that snapshot
+    ("period=none", presence inactive) on their devices indefinitely.
+
+    Kills: engine.Engine._run_zone notifying only `if transition is not None
+    or sent`.
+    """
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, changed = build(
+        commander,
+        lights=[201],
+        hold_seconds=1200,
+        periods=[make_period("Evening", "18:00", "23:00", levels={"201": 60})],
+    )
+    make_device(101, "relay", onState=True)
+    make_device(201, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+    assert engine.zones[zone.name].state is ZoneState.OCCUPIED, "precondition"
+    changed.clear()
+
+    later = clock.at(seconds=60)
+    engine.reload(engine.config, later)
+    summary = engine.tick(later)
+    assert summary.transitions == (), "precondition: the reload moved nothing"
+    assert engine.zones[zone.name].state is ZoneState.OCCUPIED
+    assert zone.name in [z.name for z in changed], (
+        "the rebuilt zone was evaluated but never republished; its device keeps "
+        "the pre-evaluation snapshot the reload pushed"
+    )

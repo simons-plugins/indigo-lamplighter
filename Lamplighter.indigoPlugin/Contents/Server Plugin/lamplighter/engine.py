@@ -539,8 +539,13 @@ class Engine:
             transitions.append(transition)
         if sent:
             commands.extend(sent)
-        if transition is not None or sent:
-            self._notify(zone)
+        # Always, not only on a transition or a command: an evaluation moves
+        # the zone's counters, its last trigger and its explain line even
+        # when the state holds, and a config reload publishes every rebuilt
+        # zone BEFORE this pass has evaluated it -- a zone that then lands in
+        # the same state would otherwise keep that pre-evaluation snapshot
+        # ("period=none", presence inactive) on its device indefinitely.
+        self._notify(zone)
 
     def _schedule_wake(self, zone, now, sent) -> None:
         """The zone's own next wake, brought forward to re-check a command.
