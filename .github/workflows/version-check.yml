@@ -79,7 +79,7 @@ jobs:
           # UNDOCUMENTED store limit: the Plugin Store keeps CFBundleVersion in a
           # varchar(8) column. Longer values fail ingestion with "1406 (22001): Data
           # too long for column 'bundleVersion'" and the store silently stops picking
-          # up releases. Note 2026.2.12 satisfies X.Y.Z yet still breaks it, which is
+          # up releases. Note a value like 2026.2.12 satisfies X.Y.Z yet still breaks it, which is
           # why this needs its own check.
           if [ -n "$BUNDLE_VERSION" ] && [ ${#BUNDLE_VERSION} -gt 8 ]; then
             echo "::error::CFBundleVersion '$BUNDLE_VERSION' is ${#BUNDLE_VERSION} characters; the Plugin Store column holds 8. Per the Plugin Developer's Guide CFBundleVersion 'represents the layout of the bundle' and 'is controlled by us' (Indigo Domotics) — it is not your release version (that is PluginVersion). Use a short static value such as 1.0.0 and do not bump it per release."
