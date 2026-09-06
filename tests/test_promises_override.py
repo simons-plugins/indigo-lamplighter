@@ -156,7 +156,7 @@ def test_late_reporter_never_overrides():
     """[M3] A device reporting from an already-off-desired state cannot create
     an override, however late the report arrives.
 
-    Kills: drop the before-state check. The 50 s round-trip reporter (R6) is
+    Kills: drop the before-state check. A late reporter (R6) is
     the reason: its reports arrive against a history that is already off
     desired, so nothing changed hands.
 
@@ -400,7 +400,7 @@ def test_excluded_device_never_overrides():
     zone = occupied_zone(override={"exclude": [202]})
     assert zone.config.override.exclude == (202,)
 
-    # The 50 s reporter reports late, from its desired level, and does not lock.
+    # A late reporter reports from its desired level and does not lock.
     assert fire(zone, EchoBook(), 202, 30, 5) is False
     # ...while the light beside it is judged normally.
     assert fire(zone, EchoBook(), 201, 60, 20) is True

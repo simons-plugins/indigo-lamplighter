@@ -222,7 +222,7 @@ def is_manual_override(
         return False
 
     if device_id in zone.config.override.exclude:
-        # Excluded from *detection*, not from the plan: the 50 s reporter is
+        # Excluded from *detection*, not from the plan: a late reporter is
         # still commanded normally (R6, M10a).
         logger.debug(
             f"{zone.name}: change from {device_name} ignored -- the device is in "

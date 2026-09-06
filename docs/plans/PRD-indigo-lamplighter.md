@@ -72,7 +72,7 @@ fix, with the evidence. These are the acceptance criteria, not background.
 | R3 | An echo of our command that arrives after the desired level moved back onto the device's pre-command state is still ours: remember the state each device was commanded away from, 15 s, consumed once. | Review of #16: in-room lux rises → not dark → lights off → delayed on-echo read as override. |
 | R4 | A zone re-plans only when an **input** changes: presence on/off, presence last-seen crossing the hold, lux crossing the (hysteresis-widened) threshold, a period boundary, an override starting or ending. Not on any device update. | Occupatum ticked every 1.2 s → hundreds of re-plans an hour → reverts within a second, 10 s callback lag. |
 | R5 | Brightness comparisons use a proportional band: `max(1, ceil(10 % of target))`, with 0 and 100 exact. | zigbee2mqtt truncates both ways (30 → 29); a group dimmer reads back 45..48 for 50. |
-| R6 | A slow reporter (50 s round trip) is neither retried nor suppressed nor treated as an override; it is reconciled when it finally reports. | 'Kitchen - LED Strip' self-locked the zone under the fork; needed `exclude_from_lock`. |
+| R6 | A late reporter (a device whose state arrives seconds or more after the command) is neither retried nor suppressed nor treated as an override; it is reconciled when it finally reports. | Under the fork's 2 s confirm-and-suppress machinery, any light that had not reported by the re-check could read as a manual override; the workaround was `exclude_from_lock_dev_ids`. |
 | R7 | A dimmer that flashes to its previous level before settling must not lock. | Tuya TS0502B turn-on behaviour; covered by R1 (previous state off desired). |
 | R8 | A device whose state cannot be read warns once and is excluded from override detection, and the zone keeps working for its other devices. | Fork `_check_confirm` fall-through was a level-5 log. |
 | R9 | Lux gating is a Schmitt trigger: the band applies only when leaving dark, and must be wider than the zone's own lights add at the sensor. | Kitchen sensor is in the kitchen; +100..200 lux from the lights. |
@@ -252,7 +252,7 @@ recovery scans, writer re-evaluation and the re-evaluation rate limit.
 - Relays: desired `on`/`off` compare `onState`; dimmers compare `brightness`;
   a device with neither warns once and is excluded from override detection
   (R8) but still receives commands.
-- Turn-on flash (R7) and slow reporters (R6) need no special handling under
+- Turn-on flash (R7) and late reporters (R6) need no special handling under
   R1 and §5.8; they are acceptance tests, not code paths.
 
 ### 5.10 State on the zone device
@@ -388,7 +388,7 @@ Must-have promises (the fork's numbering in brackets):
 - periods: sunset-relative resolves against the server; midnight wrap; overlap
   rejected with the pair named; "off only" mode.
 - reconcile: one command per device per pass; backoff sequence; warning once;
-  a device reporting at desired clears backoff; slow reporter reconciled
+  a device reporting at desired clears backoff; late reporter reconciled
   without retry storms.
 - config: invalid file rejected with the path; hot reload preserves override
   and presence state; unknown device id warns and the zone keeps running.

@@ -177,7 +177,7 @@ def test_the_first_backoff_step_warns_once_naming_actual_and_desired(caplog):
     1:` -> `if False:` (silence).
     """
     zone = occupied_zone({"201": 60}, (201,))
-    make_device(201, "dimmer", brightness=12, name="Kitchen - LED Strip")
+    make_device(201, "dimmer", brightness=12, name="Late Strip")
     commander = RecordingCommander(apply=False)
     reconciler = Reconciler(commander, EchoBook(), LOG)
 
@@ -189,7 +189,7 @@ def test_the_first_backoff_step_warns_once_naming_actual_and_desired(caplog):
 
     assert len(caplog.records) == 1, "once per condition per device, not once per tick"
     message = caplog.records[0].getMessage()
-    assert "Kitchen - LED Strip" in message and "201" in message
+    assert "Late Strip" in message and "201" in message
     assert "12" in message and "60" in message, "actual and desired must both be named"
 
 
@@ -212,7 +212,7 @@ def test_a_device_reporting_at_desired_clears_its_backoff_silently(caplog):
     reconciler.run(zone, NOW + TICK * 2)  # pass 2: first backoff step
     assert reconciler.backoff_step(201) == 2
 
-    # It finally reports at desired -- 50 s late, but it got there (R6).
+    # It finally reports at desired -- late, but it got there (R6).
     apply_level(device, 60)
     caplog.clear()  # the first backoff step above legitimately warned
     with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
@@ -236,11 +236,11 @@ def test_a_device_reporting_at_desired_clears_its_backoff_silently(caplog):
 
 
 def test_a_slow_reporter_is_reconciled_without_a_retry_storm(caplog):
-    """A device with a 50 s round trip is neither retried inside the window,
+    """A device that reports late is neither retried inside the window,
     nor suppressed, nor treated as an override; it is reconciled when it
     finally reports (R6).
 
-    Kills: count a missing confirmation as a failure. 'Kitchen - LED Strip'
+    Kills: count a missing confirmation as a failure. A late reporter
     self-locked its zone under the fork and needed exclude_from_lock to work
     at all.
 
@@ -251,7 +251,7 @@ def test_a_slow_reporter_is_reconciled_without_a_retry_storm(caplog):
     self-lock).
     """
     zone = occupied_zone({"201": 60}, (201,))
-    device = make_device(201, "dimmer", brightness=0, name="Kitchen - LED Strip")
+    device = make_device(201, "dimmer", brightness=0, name="Late Strip")
     book = EchoBook()
     commander = RecordingCommander(apply=False)
     reconciler = Reconciler(commander, book, LOG)

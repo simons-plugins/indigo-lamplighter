@@ -130,7 +130,7 @@ class RecordingCommander:
     "one command per device per pass" is a statement about this list.
 
     `apply` decides whether the device actually MOVES when commanded: False
-    models hardware that has not reported back yet (the slow reporter, the
+    models hardware that has not reported back yet (the late reporter, the
     device that never lands), True models a light that answers instantly, and
     a container of device ids models a room with one broken bulb in it. That
     distinction is the difference between the backoff promises and the
