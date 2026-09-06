@@ -1,0 +1,50 @@
+# Runs the pytest suite on every PR and on every push to main.
+#
+# The plugin is stdlib-only; the SUITE's dev-only dependencies live in
+# requirements-dev.txt (pytest, and jsonschema to prove schema.json is
+# valid JSON Schema, validate the example config and the Auto Lights
+# converter output against it, and check the stdlib loader agrees with
+# it) -- installed from that file so CI cannot drift from it. Matrix:
+# 3.10 is the floor the plugin claims, 3.13 is what jarvis actually runs
+# (IndigoPluginHost3 -> 3.13). fail-fast off so a version-specific
+# breakage is visible as such.
+
+name: Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# A newer push to the same PR cancels the superseded run; main never cancels.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run test suite
+        run: python3 -m pytest -q
