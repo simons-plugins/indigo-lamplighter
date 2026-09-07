@@ -52,6 +52,12 @@ CONTROLLER_TYPE_ID = "lamplighter_controller"
 
 CONFIG_FILENAME = "lamplighter.json"
 
+#: The bundled status page (PRD: read-only view of every zone) and where it
+#: is copied from/into. Mirrors indigo-unifi-protect's cameras.html plumbing
+#: (issue #27 there) so the pattern is consistent across the workspace.
+WEB_PAGE_FILENAME = "lamplighter.html"
+WEB_PAGE_BUNDLE_DIR = "Lamplighter.indigoPlugin"
+
 #: What a fresh install gets written for it. It is deliberately a document the
 #: loader *refuses* -- ``zones`` may not be empty in a configured file -- so
 #: the "no zones yet" case is recognised here by shape rather than by reading
@@ -78,6 +84,22 @@ MIN_LOOP_SECONDS = 0.1
 
 #: The value the zone pickers use for "every zone" (Actions.xml).
 ALL_ZONES = "__all__"
+
+
+def _truthy(value, default=True):
+    """Coerce a prefs checkbox value to bool.
+
+    Indigo can hand a checkbox prop back as the STRING "false" rather than
+    the bool False, and `bool("false")` is True -- so a naive `.get(key,
+    True)` would silently ignore a user unticking the box. None (the pref
+    was never set, e.g. an existing install upgrading past this feature)
+    resolves to `default`.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
 
 
 def config_dir() -> str:
@@ -296,6 +318,7 @@ class Plugin(indigo.PluginBase):
             f"Lamplighter: started with {len(self.engine.zones)} zone(s) from "
             f"{self.config_file}."
         )
+        self._sync_web_page()
 
     def shutdown(self):
         # No super().shutdown() -- the base class does not define one.
@@ -312,6 +335,7 @@ class Plugin(indigo.PluginBase):
         self.indigo_log_handler.setLevel(self.log_level)
         self.plugin_file_handler.setLevel(self.log_level)
         self.logger.debug(f"Lamplighter: log level is now {self.log_level}")
+        self._sync_web_page(values_dict)
 
     # ------------------------------------------------------- Indigo callbacks
 
@@ -1090,4 +1114,118 @@ class Plugin(indigo.PluginBase):
             self.logger.warning(
                 "Lamplighter: the controller device is off, so no zone will write to a "
                 "light. Turn it on to resume."
+            )
+
+    # --------------------------------------------------------- status page
+
+    @staticmethod
+    def _web_page_paths(install):
+        source = os.path.join(
+            install, "Plugins", WEB_PAGE_BUNDLE_DIR, "Contents",
+            "Resources", "pages", WEB_PAGE_FILENAME,
+        )
+        dest_dir = os.path.join(install, "Web Assets", "static", "pages")
+        return source, dest_dir, os.path.join(dest_dir, WEB_PAGE_FILENAME)
+
+    def _warn_if_managed_page_is_stale(self):
+        """Pref is OFF, so no write happens -- but a stale installed page is
+        worth one INFO. Read-only and best-effort: any failure here
+        (missing bundle, permissions, whatever) is DEBUG only, because an
+        opted-out user must not get WARNINGs about a file the plugin isn't
+        managing."""
+        try:
+            install = indigo.server.getInstallFolderPath()
+            source, _dest_dir, dest = self._web_page_paths(install)
+            if not (os.path.isfile(source) and os.path.isfile(dest)):
+                return
+            with open(source, "rb") as handle:
+                source_bytes = handle.read()
+            with open(dest, "rb") as handle:
+                dest_bytes = handle.read()
+            if source_bytes != dest_bytes:
+                self.logger.info(
+                    f"Lamplighter status page management is off, and the installed "
+                    f"page ({dest}) differs from the bundled one (v{self.pluginVersion}) "
+                    "- update it by hand, or re-tick 'Manage the status page' to have "
+                    "the plugin do it."
+                )
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.debug(f"Could not check the installed status page for staleness: {exc}")
+
+    def _sync_web_page(self, prefs=None):
+        """Install/update the bundled status page into Web Assets on startup
+        and on every prefs save, so users stop manually copying it after
+        every change.
+
+        Must NEVER raise out of startup: the whole body is one try/except,
+        and every failure path -- missing bundle, empty bundle, unreadable/
+        unwritable destination -- is a WARNING naming the destination path
+        and the retry path, so the user can copy the file by hand instead.
+        When the pref is off, no write happens, but `_warn_if_managed_page_
+        is_stale` still flags a stale installed copy at INFO.
+        """
+        prefs = self.pluginPrefs if prefs is None else prefs
+        if not _truthy(prefs.get("managePage")):
+            self._warn_if_managed_page_is_stale()
+            return
+
+        dest = None
+        tmp = None
+        try:
+            install = indigo.server.getInstallFolderPath()
+            source, dest_dir, dest = self._web_page_paths(install)
+
+            if not os.path.isfile(source):
+                self.logger.warning(
+                    f"Lamplighter status page not found in the plugin bundle ({source}) "
+                    f"- cannot install/update it at {dest}. Reinstalling the plugin "
+                    "should restore the bundled copy."
+                )
+                return
+
+            with open(source, "rb") as handle:
+                source_bytes = handle.read()
+
+            if not source_bytes:
+                self.logger.warning(
+                    f"Bundled Lamplighter status page at {source} is empty (truncated "
+                    f"or corrupt) - refusing to install it over {dest}. Reinstalling "
+                    "the plugin should restore the bundled copy."
+                )
+                return
+
+            dest_bytes = None
+            if os.path.isfile(dest):
+                with open(dest, "rb") as handle:
+                    dest_bytes = handle.read()
+
+            if dest_bytes == source_bytes:
+                self.logger.debug(f"Lamplighter status page already up to date in Web Assets ({dest})")
+                return
+
+            os.makedirs(dest_dir, exist_ok=True)
+            tmp = f"{dest}.tmp"
+            with open(tmp, "wb") as handle:
+                handle.write(source_bytes)
+            os.replace(tmp, dest)
+            tmp = None  # installed -- nothing left to clean up
+
+            self.logger.info(
+                f"Installed/updated the Lamplighter status page in Web Assets "
+                f"(v{self.pluginVersion} -> managed by the plugin; untick 'Manage the "
+                "status page' to hand-edit it)"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            if tmp is not None:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            where = dest or f"Web Assets/static/pages/{WEB_PAGE_FILENAME}"
+            self.logger.warning(
+                f"Could not install/update the Lamplighter status page at {where}: "
+                f"{exc}. Copy the bundled copy (Contents/Resources/pages/"
+                f"{WEB_PAGE_FILENAME} inside the plugin bundle) there by hand, or "
+                "untick 'Manage the status page' to stop the plugin trying. The "
+                "plugin will retry at the next config save or plugin restart."
             )

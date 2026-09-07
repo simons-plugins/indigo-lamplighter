@@ -52,8 +52,19 @@ def _clean_warnings():
 
 @pytest.fixture
 def install(tmp_path, monkeypatch):
-    """A fake Indigo installation folder the plugin will write into."""
+    """A fake Indigo installation folder the plugin will write into.
+
+    Includes the bundled status page in its expected Plugins/ location, same
+    as a real installed plugin bundle, so startup's `_sync_web_page` finds it
+    rather than warning about a missing bundle in every wiring test.
+    """
     monkeypatch.setattr(indigo.server, "getInstallFolderPath", lambda: str(tmp_path))
+    page = (
+        tmp_path / "Plugins" / "Lamplighter.indigoPlugin" / "Contents"
+        / "Resources" / "pages" / "lamplighter.html"
+    )
+    page.parent.mkdir(parents=True)
+    page.write_bytes(b"<!doctype html><title>Lamplighter</title>")
     return tmp_path
 
 
