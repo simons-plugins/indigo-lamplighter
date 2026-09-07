@@ -15,7 +15,7 @@
         </List>
     </Field>
     <Field id="config_location" type="label" fontSize="small" alignWithControl="false">
-        <Label>Zones are configured in lamplighter.json, under Preferences/Plugins/com.simons-plugins.indigo-lamplighter/ in your Indigo installation folder. The plugin watches the file and reloads it within five seconds of a save; if the new file does not validate, the error is logged and the previous configuration keeps running.</Label>
+        <Label>Zones are configured in lamplighter.json, under Preferences/Plugins/com.simons-plugins.indigo-lamplighter/ in your Indigo installation folder. The plugin watches the file and reloads it within a few seconds of a save; if the new file does not validate, the error is logged and the previous configuration keeps running.</Label>
     </Field>
 
     <Field id="sep1" type="separator"/>

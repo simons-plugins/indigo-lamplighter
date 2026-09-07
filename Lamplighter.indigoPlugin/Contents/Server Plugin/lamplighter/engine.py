@@ -562,8 +562,8 @@ class Engine:
         one entry in the timer map the engine already keeps, and if the device
         has landed by then the re-check costs a comparison and clears the
         ladder silently. What it buys is the difference between retrying an
-        ignored command in five seconds and retrying it at the next periodic
-        pass, up to ``reconcile_seconds`` away.
+        ignored command ``COMMAND_RECHECK_SECONDS`` later and retrying it at
+        the next periodic pass, up to ``reconcile_seconds`` away.
         """
         wake = zone.next_wake(now)
         if not sent:

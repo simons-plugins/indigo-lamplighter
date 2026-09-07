@@ -42,21 +42,23 @@ commanded off, the PIR re-tripped before any pass had seen it at off, and the
 lamp coming on to 80 was reported as "did not reach its desired level. It
 reads 0 and the zone wants 80" about a lamp that was working perfectly.
 
-**A command is re-checked once, five seconds later.** This is not a settle
-poll and not a thread: the reconciler asks the engine to bring that zone's
-next wake-up forward (:data:`COMMAND_RECHECK_SECONDS`), and the ordinary
-worker pass does the looking. It buys the thing the periodic tick could not:
-a device that genuinely ignored a command is re-sent in about five seconds
-rather than up to a full reconcile interval, and a device that simply had not
-reported yet clears silently at the same moment instead of being warned about.
+**A command is re-checked once, `COMMAND_RECHECK_SECONDS` later.** This is not
+a settle poll and not a thread: the reconciler asks the engine to bring that
+zone's next wake-up forward (:data:`COMMAND_RECHECK_SECONDS`), and the
+ordinary worker pass does the looking. It buys the thing the periodic tick
+could not: a device that genuinely ignored a command is re-sent in about
+`COMMAND_RECHECK_SECONDS` rather than up to a full reconcile interval, and a
+device that simply had not reported yet clears silently at the same moment
+instead of being warned about.
 
-The five seconds is also a floor, not just a schedule. A pass can run sooner
-for a reason that has nothing to do with the command just sent -- another
-zone's own wake, an input edge such as the room's own lux sensor reacting to
-the lights coming on -- and such a pass leaves a device commanded within the
-window alone: it is in flight, not failed, and is neither re-commanded nor
-warned about. Only a pass at or after the five seconds is entitled to judge
-it, whatever woke the zone.
+`COMMAND_RECHECK_SECONDS` is also a floor, not just a schedule. A pass can run
+sooner for a reason that has nothing to do with the command just sent --
+another zone's own wake, an input edge such as the room's own lux sensor
+reacting to the lights coming on -- and such a pass leaves a device commanded
+within the window alone: it is in flight, not failed, and is neither
+re-commanded nor warned about. Only a pass at or after the
+`COMMAND_RECHECK_SECONDS` re-check is entitled to judge it, whatever woke the
+zone.
 """
 
 from __future__ import annotations
@@ -85,17 +87,20 @@ BACKOFF_TICKS = (1, 2, 4, 8)
 #: on the air one night and twenty-eight the next (one node retrying held
 #: the queue). A shorter re-check judged the last node before its command
 #: had been transmitted and queued a duplicate behind it. Thirty seconds
-#: covers a slow Z-Wave batch; a genuinely ignored command is still retried
-#: well inside the periodic pass.
+#: covers a slow Z-Wave batch; the second command for a genuinely ignored
+#: one comes at this re-check, and each one after that follows the backoff
+#: ladder.
 COMMAND_RECHECK_SECONDS = 30.0
 
 #: How often a device is retried once it is past the whole backoff ladder --
 #: commanded more times than ``BACKOFF_TICKS`` has entries. This is wall
 #: clock, not passes: ``passes`` is one counter shared by every zone, so a
-#: house with several zones and the five-second re-check above can run
-#: through the ladder's cap of eight ticks in under a minute, and a device
-#: wedged behind a switch that is normally off gets commanded that often for
-#: as long as the zone wants it. Ten minutes between attempts is long enough
+#: house with several zones and the ``COMMAND_RECHECK_SECONDS`` re-check
+#: above can run through the ladder's cap of eight ticks in minutes, not
+#: under a minute, given the 30-second floor and the 60-second periodic
+#: pass -- and a device wedged behind a switch that is normally off gets
+#: commanded that often for as long as the zone wants it. Ten minutes
+#: between attempts is long enough
 #: that a device stuck this way stops being the dominant source of Zigbee or
 #: Z-Wave traffic in the house, and short enough that a device that comes
 #: back on its own is not left off desired for long.
