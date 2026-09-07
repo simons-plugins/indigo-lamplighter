@@ -7,6 +7,7 @@ and does each one stay non-fatal and say so in the Event Log?
 """
 
 import logging
+import os
 from pathlib import Path
 
 import indigo
@@ -60,6 +61,13 @@ def test_the_status_page_is_installed_into_web_assets_on_startup(install, monkey
 
 
 def test_an_up_to_date_page_is_not_rewritten(install, monkeypatch, caplog):
+    """Any write to the destination -- by any means -- is fatal here, not
+    merely unobserved. A spy that only records `os.replace` calls survives a
+    mutant that rewrites the page via `open(dest, "wb")` or `shutil.copyfile`
+    instead; this makes every write path fatal so none of them survive."""
+    import builtins
+    import shutil
+
     source = _bundle_source_path(install)
     source.parent.mkdir(parents=True)
     source.write_bytes(b"<html>same</html>")
@@ -67,18 +75,30 @@ def test_an_up_to_date_page_is_not_rewritten(install, monkeypatch, caplog):
     dest.parent.mkdir(parents=True)
     dest.write_bytes(b"<html>same</html>")
 
-    calls = []
-    real_replace = plugin_module.os.replace
-    monkeypatch.setattr(
-        plugin_module.os, "replace",
-        lambda *a, **k: (calls.append(a) or real_replace(*a, **k)),
-    )
+    forbidden_paths = {str(dest), f"{dest}.tmp"}
+    write_modes = ("w", "a", "x", "+")
+    real_open = builtins.open
+
+    def guarded_open(file, mode="r", *args, **kwargs):
+        if str(file) in forbidden_paths and any(flag in mode for flag in write_modes):
+            raise AssertionError(f"page must not be written: open({file!r}, {mode!r})")
+        return real_open(file, mode, *args, **kwargs)
+
+    def guarded_replace(*_a, **_k):
+        raise AssertionError("page must not be written: os.replace")
+
+    def guarded_copy(*_a, **_k):
+        raise AssertionError("page must not be written: shutil.copy*")
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(plugin_module.os, "replace", guarded_replace)
+    monkeypatch.setattr(shutil, "copyfile", guarded_copy)
+    monkeypatch.setattr(shutil, "copy", guarded_copy)
 
     plug = make_plugin(managePage=True)
     with caplog.at_level("DEBUG"):
-        plug._sync_web_page()
+        plug.startup()  # must not raise
 
-    assert calls == [], "os.replace must not be called when the page is already current"
     assert dest.read_bytes() == b"<html>same</html>"
     debugs = [r for r in caplog.records
               if r.levelname == "DEBUG" and "already up to date" in r.getMessage()]
@@ -119,6 +139,7 @@ def test_with_the_pref_off_nothing_is_written_but_a_stale_copy_is_noted(install,
     infos = [r for r in caplog.records
              if r.levelname == "INFO" and str(dest) in r.getMessage()]
     assert len(infos) == 1
+    assert "differs from the bundled one" in infos[0].getMessage()
 
 
 def test_a_missing_bundle_page_warns_and_does_not_raise(install, monkeypatch, caplog):
@@ -220,11 +241,12 @@ def test_a_programming_error_in_the_page_sync_is_logged_with_a_traceback_not_as_
     assert errors[0].exc_info is not None
     assert "sync failed unexpectedly" in errors[0].getMessage()
 
-    copy_warnings = [
-        r for r in caplog.records
-        if r.levelname == "WARNING" and "copy it by hand" in r.getMessage().lower()
-    ]
-    assert copy_warnings == []
+    # The old filter here looked for "copy it by hand", which the real
+    # message never contains ("Copy the bundled copy ... there by hand") --
+    # it matched nothing and always passed. A programming error must not
+    # produce the friendly filesystem-problem WARNING at all.
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == []
 
 
 def test_a_leftover_tmp_file_is_named_in_the_warning(install, monkeypatch, caplog):
@@ -294,3 +316,241 @@ def test_with_the_pref_off_a_missing_bundle_page_is_still_noted(install, monkeyp
     assert str(source) in infos[0].getMessage()
     assert "reinstalling the plugin restores it" in infos[0].getMessage()
     assert not dest.exists()
+
+
+# ------------------------------------------------------- _truthy (mutation review)
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, True),
+        ("false", False),
+        ("0", False),
+        ("True", True),
+        (" yes ", True),
+        ("maybe", False),
+        (0, False),
+        (True, True),
+    ],
+)
+def test_truthy_table(value, expected):
+    assert plugin_module._truthy(value) is expected
+
+
+def test_truthy_logs_a_debug_for_an_unrecognised_string(caplog):
+    """Mutant: an unrecognised string coerced to True instead of False."""
+    logger = logging.getLogger("lamplighter.test_truthy")
+    with caplog.at_level("DEBUG", logger=logger.name):
+        result = plugin_module._truthy("maybe", logger=logger)
+
+    assert result is False
+    debugs = [
+        r for r in caplog.records
+        if r.levelname == "DEBUG" and "unrecognised value" in r.getMessage()
+    ]
+    assert len(debugs) == 1
+    assert "'maybe'" in debugs[0].getMessage()
+
+
+def test_the_string_false_from_an_indigo_checkbox_means_off(install, monkeypatch, caplog):
+    """Indigo can hand a checkbox prop back as the STRING "false" rather
+    than the bool False. `bool("false")` is True, so a mutant that reads
+    the pref with `.get("managePage", True)` instead of going through
+    `_truthy` would treat this as "management on" and overwrite a
+    hand-edited page."""
+    source = _bundle_source_path(install)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"<html>new</html>")
+    dest = _installed_dest_path(install)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"<html>hand-edited</html>")
+
+    plug = make_plugin(managePage="false")
+    with caplog.at_level("INFO"):
+        plug._sync_web_page()
+
+    assert dest.read_bytes() == b"<html>hand-edited</html>"
+    infos = [r for r in caplog.records
+             if r.levelname == "INFO" and str(dest) in r.getMessage()]
+    assert len(infos) == 1
+    assert "differs from the bundled one" in infos[0].getMessage()
+
+
+# ------------------------------------------------------- cancelled prefs dialog
+
+def test_a_cancelled_preferences_dialog_does_not_touch_the_page(install, monkeypatch, caplog):
+    """Mutant: the `user_cancelled` early return loses its effect (the sync
+    call moves ahead of it), so a Cancel click would still install/update
+    the page from whatever was in the dialog's fields."""
+    source = _bundle_source_path(install)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"<html>new</html>")
+    dest = _installed_dest_path(install)
+    assert not dest.exists()
+
+    plug = make_plugin(managePage=False)
+    with caplog.at_level("INFO"):
+        plug.closedPrefsConfigUi({"managePage": True}, user_cancelled=True)
+
+    assert not dest.exists()
+    infos = [r for r in caplog.records if r.levelname == "INFO"]
+    assert infos == []
+
+
+# ------------------------------------------------------- the real bundled page
+
+def test_the_bundled_status_page_is_real(tmp_path):
+    """The page installed by `_sync_web_page` is the real, shipped one --
+    not a placeholder that happens to satisfy the other tests' fixtures.
+    Mutant: replace the bundled page with a tiny placeholder (verified
+    separately, against a temp copy, never the real file)."""
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    real_page = os.path.join(
+        repo_root, "Lamplighter.indigoPlugin", "Contents", "Resources", "pages",
+        "lamplighter.html",
+    )
+    assert os.path.isfile(real_page)
+    assert os.path.getsize(real_page) > 5000
+
+    content = Path(real_page).read_text(encoding="utf-8")
+    for needle in (
+        "indigo-page-name",
+        plugin_module.PLUGIN_ID,
+        "lamplighter_zone",
+        "lamplighter_controller",
+        "api-key",
+    ):
+        assert needle in content, f"expected {needle!r} in the bundled status page"
+
+    # `_web_page_paths` resolves WEB_PAGE_BUNDLE_DIR/WEB_PAGE_FILENAME under
+    # <install>/Plugins/... -- mirror the real repo layout with a symlink so
+    # the computed path actually points at the on-disk file above, rather
+    # than merely looking plausible as a string.
+    install = tmp_path / "install"
+    install.mkdir()
+    (install / "Plugins").symlink_to(repo_root, target_is_directory=True)
+
+    computed_source, _dest_dir, _dest = plugin_module.Plugin._web_page_paths(str(install))
+    assert os.path.isfile(computed_source)
+    assert os.path.samefile(computed_source, real_page)
+
+
+# ------------------------------------------------------- install folder lookup
+
+def test_getinstallfolderpath_raising_is_reported_but_does_not_escape_startup(
+    install, monkeypatch, caplog
+):
+    """`startup()` calls `indigo.server.getInstallFolderPath()` once for its
+    own config path before `_sync_web_page` calls it again at the end --
+    only the second of those is inside the try/except this test pins.
+    Mutant: remove that inner try/except, which lets the RuntimeError fall
+    through to the method's outer `except Exception`, turning the intended
+    WARNING naming the install folder into an ERROR with a traceback
+    instead."""
+    install_dir = str(install)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return install_dir
+        raise RuntimeError("no install folder")
+
+    monkeypatch.setattr(indigo.server, "getInstallFolderPath", flaky)
+
+    plug = make_plugin(managePage=True)
+    with caplog.at_level("DEBUG"):
+        plug.startup()  # must not raise
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "install folder" in message.lower()
+    assert "Web Assets/static/pages/lamplighter.html" in message
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors == []
+
+
+# ------------------------------------------------------- stale check, tightened
+
+def test_the_stale_check_says_nothing_when_the_pages_are_identical(install, monkeypatch, caplog):
+    """Mutant: the byte comparison in `_warn_if_managed_page_is_stale` is
+    replaced with something that always considers the pages different."""
+    source = _bundle_source_path(install)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"<html>identical</html>")
+    dest = _installed_dest_path(install)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"<html>identical</html>")
+
+    plug = make_plugin(managePage=False)
+    with caplog.at_level("DEBUG"):
+        plug._sync_web_page()
+
+    infos = [r for r in caplog.records if r.levelname == "INFO"]
+    assert infos == []
+
+
+def test_the_stale_check_swallows_an_unreadable_installed_page_at_debug(
+    install, monkeypatch, caplog
+):
+    """A filesystem problem while reading the *installed* page for the
+    staleness check is DEBUG-only, not a WARNING -- an opted-out user must
+    not get WARNINGs about a file the plugin isn't managing. Mutant: log the
+    OSError at WARNING instead."""
+    import builtins
+
+    source = _bundle_source_path(install)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"<html>new</html>")
+    dest = _installed_dest_path(install)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"<html>old</html>")
+
+    real_open = builtins.open
+
+    def flaky_open(path, *args, **kwargs):
+        if str(path) == str(dest):
+            raise PermissionError("permission denied")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", flaky_open)
+
+    plug = make_plugin(managePage=False)
+    with caplog.at_level("DEBUG"):
+        plug._sync_web_page()
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == []
+    debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert len(debugs) == 1
+    assert "permission denied" in debugs[0].getMessage()
+
+
+# ------------------------------------------------------- _cleanup_tmp success path
+
+def test_cleanup_tmp_success_leaves_no_partial_file_note(install, monkeypatch, caplog):
+    """When `os.replace` fails but the fallback `os.remove` on the `.tmp`
+    file actually succeeds, the WARNING must not claim a partial file was
+    left behind, and no `.tmp` file remains on disk. Mutant: always append
+    the "partial file was left" note regardless of whether cleanup worked."""
+    source = _bundle_source_path(install)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"<html>new</html>")
+    dest = _installed_dest_path(install)
+
+    monkeypatch.setattr(
+        plugin_module.os, "replace",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+
+    plug = make_plugin(managePage=True)
+    with caplog.at_level("WARNING"):
+        plug._sync_web_page()  # must not raise
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "partial file" not in message
+    assert not os.path.exists(f"{dest}.tmp")
