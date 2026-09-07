@@ -46,6 +46,7 @@ padding:4px 10px;border-radius:999px;white-space:nowrap;flex:0 0 auto}
 .chip.overridden{background:rgba(201,130,47,.18);color:var(--warn)}
 .chip.offduty{background:var(--chip-bg);color:var(--muted)}
 .chip.disabled{background:var(--chip-bg);color:var(--muted)}
+.chip.unknown{background:var(--chip-bg);color:var(--muted)}
 .facts{font-size:13px;color:var(--text-secondary);margin-bottom:10px;line-height:1.5}
 .facts span{white-space:nowrap}
 .facts span+span:before{content:" · "}
@@ -119,42 +120,38 @@ class IndigoAPI {
     // skill reference, but the command helpers (turnOn/setBrightness/etc.)
     // are intentionally omitted — Lamplighter status never sends commands.
 
-    observe(deviceId, callback, intervalMs = 5000) {
-        let lastJson = null;
-        const poll = async () => {
-            try {
-                const device = await this.getDevice(deviceId);
-                const json = JSON.stringify(device);
-                if (json !== lastJson) {
-                    lastJson = json;
-                    callback(device);
-                }
-            } catch (err) {
-                this._handleError(err);
-            }
-        };
-        poll();
-        const timer = setInterval(poll, intervalMs);
-        return { stop: () => clearInterval(timer) };
+    // Self-scheduling: the next poll is only queued once the current one has
+    // settled (in `finally`), so a slow endpoint cannot stack overlapping
+    // requests or deliver them out of order. `callback` runs on every
+    // successful fetch, raw payload and all; `onOk`, when given, also runs on
+    // every successful fetch, before `callback` -- callers use it for things
+    // like an "updated" timestamp or clearing a transport error banner, kept
+    // separate so `callback` is free to do its own diffing for a DOM rebuild
+    // without that diff swallowing onOk's per-poll bookkeeping.
+    observe(deviceId, callback, intervalMs = 5000, onOk = null) {
+        return this._pollLoop(() => this.getDevice(deviceId), callback, intervalMs, onOk);
     }
 
-    observeAll(callback, intervalMs = 5000) {
-        let lastJson = null;
+    observeAll(callback, intervalMs = 5000, onOk = null) {
+        return this._pollLoop(() => this.getDevices(), callback, intervalMs, onOk);
+    }
+
+    _pollLoop(fetchFn, callback, intervalMs, onOk) {
+        let stopped = false;
+        let timer = null;
         const poll = async () => {
             try {
-                const devices = await this.getDevices();
-                const json = JSON.stringify(devices);
-                if (json !== lastJson) {
-                    lastJson = json;
-                    callback(devices);
-                }
+                const result = await fetchFn();
+                if (onOk) { try { onOk(result); } catch (_) { /* caller's problem, not ours */ } }
+                callback(result);
             } catch (err) {
                 this._handleError(err);
+            } finally {
+                if (!stopped) timer = setTimeout(poll, intervalMs);
             }
         };
         poll();
-        const timer = setInterval(poll, intervalMs);
-        return { stop: () => clearInterval(timer) };
+        return { stop: () => { stopped = true; if (timer !== null) clearTimeout(timer); } };
     }
 
     onError(callback) {
@@ -276,6 +273,8 @@ const $ = id => document.getElementById(id);
 let indigo = null, watcher = null;
 let openIds = new Set();         // disclosures the user has opened, kept open across re-renders
 let deviceNames = {};            // id -> name, refreshed every poll
+let lastRenderedJson = null;     // gates the DOM rebuild only -- see render()
+let authFailed = false;
 
 function showErr(msg) {
   const el = $("err");
@@ -305,7 +304,8 @@ function stateChip(dev, s) {
     case "occupied": return { cls: "occupied", label: "OCCUPIED" };
     case "vacant": return { cls: "vacant", label: "VACANT" };
     case "overridden": {
-      const until = fmtTime(s.override_expires);
+      let until = "";
+      if (s.override_expires) until = fmtTime(s.override_expires) || "?";
       return { cls: "overridden", label: "OVERRIDDEN" + (until ? " · until " + until : "") };
     }
     case "off_duty": {
@@ -321,10 +321,12 @@ function stateChip(dev, s) {
 function presenceFact(s) {
   if (s.presence_active === true) return "here";
   if (s.presence_last_seen) return "hold, last seen " + fmtTime(s.presence_last_seen);
+  if (s.presence_active == null) return "presence unknown";
   return "never seen";
 }
 
 function luxFact(s) {
+  if (s.dark == null) return "lux unknown";
   const dark = s.dark === true;
   const label = dark ? "dark" : "bright";
   if (s.lux !== "" && s.lux != null) {
@@ -335,13 +337,17 @@ function luxFact(s) {
 }
 
 function parseDesired(summary) {
-  // "144694384=100, 772478931=50, ..." -> [{id, level}]
-  if (!summary) return [];
-  return summary.split(",").map(p => p.trim()).filter(Boolean).map(pair => {
+  // "144694384=100, 772478931=50, ..." -> { items: [{id, level}], unparsedCount }
+  if (typeof summary !== "string" || !summary) return { items: [], unparsedCount: 0 };
+  const items = [];
+  let unparsedCount = 0;
+  for (const pair of summary.split(",").map(p => p.trim()).filter(Boolean)) {
     const eq = pair.indexOf("=");
-    if (eq < 0) return null;
-    return { id: pair.slice(0, eq).trim(), level: pair.slice(eq + 1).trim() };
-  }).filter(Boolean);
+    const id = eq < 0 ? "" : pair.slice(0, eq).trim();
+    if (eq < 0 || !id) { unparsedCount++; continue; }
+    items.push({ id, level: pair.slice(eq + 1).trim() });
+  }
+  return { items, unparsedCount };
 }
 
 function levelLabel(level) {
@@ -357,30 +363,51 @@ function lightName(id) {
   return deviceNames[id] || ("#" + id);
 }
 
+// `parts` is a mix of plain strings (rendered as text) and
+// { text, style } objects (rendered inside a <b>) -- never raw HTML, since
+// `config_status` in particular is free-form text from the loader that may
+// echo back content of the config file.
+function addParts(hdr, parts) {
+  const span = document.createElement("span");
+  for (const part of parts) {
+    if (typeof part === "string") {
+      span.appendChild(document.createTextNode(part));
+      continue;
+    }
+    const b = document.createElement("b");
+    if (part.style) b.style.cssText = part.style;
+    b.textContent = part.text;
+    span.appendChild(b);
+  }
+  hdr.appendChild(span);
+}
+
 function renderHeader(ctrl) {
   const hdr = $("hdr");
   if (!ctrl) { hdr.hidden = true; return; }
   const s = ctrl.states || {};
   hdr.hidden = false;
-  hdr.innerHTML = "";
-  const add = (html) => {
-    const span = document.createElement("span");
-    span.innerHTML = html;
-    hdr.appendChild(span);
-  };
-  add(isOff(ctrl)
-    ? '<b style="color:var(--bad)">Disabled</b>'
-    : '<b style="color:var(--on-color)">Enabled</b>');
+  hdr.textContent = "";
+  addParts(hdr, [{
+    text: isOff(ctrl) ? "Disabled" : "Enabled",
+    style: isOff(ctrl) ? "color:var(--bad)" : "color:var(--on-color)",
+  }]);
   const total = s.zones != null ? s.zones : "?";
   const enabled = s.zones_enabled != null ? s.zones_enabled : "?";
   const overridden = s.zones_overridden != null ? s.zones_overridden : 0;
-  add(`<b>${total}</b> zones (<b>${enabled}</b> enabled, <b>${overridden}</b> overridden)`);
-  if (s.config_status) add("config: <b>" + s.config_status + "</b>");
+  addParts(hdr, [
+    { text: String(total) }, " zones (", { text: String(enabled) }, " enabled, ",
+    { text: String(overridden) }, " overridden)",
+  ]);
+  if (s.config_status) addParts(hdr, ["config: ", { text: s.config_status }]);
   const ev = s.evaluations_today != null ? s.evaluations_today : 0;
   const wr = s.writes_today != null ? s.writes_today : 0;
   const ov = s.overrides_today != null ? s.overrides_today : 0;
-  add(`today: <b>${wr}</b> writes · <b>${ev}</b> evals · <b>${ov}</b> overrides`);
-  if (s.config_loaded_at) add("loaded " + fmtTime(s.config_loaded_at));
+  addParts(hdr, [
+    "today: ", { text: String(wr) }, " writes · ", { text: String(ev) }, " evals · ",
+    { text: String(ov) }, " overrides",
+  ]);
+  if (s.config_loaded_at) addParts(hdr, ["loaded " + fmtTime(s.config_loaded_at)]);
 }
 
 // A device's on/off arrives at the top level as `onState` over the REST API;
@@ -392,6 +419,7 @@ function isOff(dev) {
 }
 
 function buildCard(dev) {
+  const hasStates = !!(dev.states && Object.keys(dev.states).length);
   const s = dev.states || {};
   const card = document.createElement("div");
   card.className = "card" + (isOff(dev) ? " disabled" : "");
@@ -402,13 +430,23 @@ function buildCard(dev) {
   const nameEl = document.createElement("div");
   nameEl.className = "zname";
   nameEl.textContent = zoneName(dev);
-  const chipInfo = stateChip(dev, s);
+  const chipInfo = hasStates ? stateChip(dev, s) : { cls: "unknown", label: "UNKNOWN" };
   const chipEl = document.createElement("span");
   chipEl.className = "chip " + chipInfo.cls;
   chipEl.textContent = chipInfo.label;
   crow.appendChild(nameEl);
   crow.appendChild(chipEl);
   card.appendChild(crow);
+
+  if (!hasStates) {
+    // A zone device that hasn't finished starting has no states at all yet --
+    // don't fabricate a period/lux/presence reading it never reported.
+    const notice = document.createElement("div");
+    notice.className = "explain";
+    notice.textContent = "no state reported (device not started?)";
+    card.appendChild(notice);
+    return card;
+  }
 
   const facts = document.createElement("div");
   facts.className = "facts";
@@ -429,14 +467,16 @@ function buildCard(dev) {
   const foot = document.createElement("div");
   foot.className = "foot";
 
-  const lightsArr = parseDesired(s.desired_summary);
+  const { items: lightsArr, unparsedCount } = parseDesired(s.desired_summary);
   const disc = document.createElement("button");
   disc.className = "disclosure";
   disc.type = "button";
   const isOpen = openIds.has(String(dev.id));
   disc.setAttribute("aria-expanded", isOpen ? "true" : "false");
   disc.innerHTML = '<span class="tri">▸</span><span class="dlabel"></span>';
-  disc.querySelector(".dlabel").textContent = lightsArr.length + (lightsArr.length === 1 ? " light" : " lights");
+  disc.querySelector(".dlabel").textContent =
+    lightsArr.length + (lightsArr.length === 1 ? " light" : " lights") +
+    (unparsedCount > 0 ? " · " + unparsedCount + " unparsed" : "");
 
   const list = document.createElement("ul");
   list.className = "lights";
@@ -475,7 +515,21 @@ function buildCard(dev) {
   return card;
 }
 
+// Called on every successful poll (see `onPollOk`), payload and all. The
+// non-array guard runs every time regardless of whether the payload changed
+// -- a persistently malformed response must keep saying so, not just once.
+// `lastRenderedJson` gates only the DOM rebuild below it.
 function render(all) {
+  if (!Array.isArray(all)) {
+    showErr("Unexpected response from Indigo (not a device list)");
+    lastRenderedJson = null;
+    return;
+  }
+
+  const json = JSON.stringify(all);
+  if (json === lastRenderedJson) return;
+  lastRenderedJson = json;
+
   deviceNames = {};
   for (const d of all) deviceNames[String(d.id)] = d.name || ("#" + d.id);
 
@@ -487,18 +541,25 @@ function render(all) {
   const grid = $("grid");
   const empty = $("empty");
   if (!zones.length) {
-    grid.innerHTML = "";
+    grid.textContent = "";
     empty.hidden = false;
     return;
   }
   empty.hidden = true;
   zones.sort((a, b) => zoneName(a).localeCompare(zoneName(b)));
 
-  grid.innerHTML = "";
+  grid.textContent = "";
   for (const z of zones) grid.appendChild(buildCard(z));
+}
 
-  $("updated").textContent = "updated " + fmtClock(new Date());
+// Runs on every successful poll, changed or not, so the banner and the
+// timestamp reflect that the connection is alive even when nothing in the
+// device list moved (and `render`, called right after, may still redisplay
+// a content error over top of the just-cleared banner).
+function onPollOk() {
+  if (authFailed) return;
   showErr("");
+  $("updated").textContent = "updated " + fmtClock(new Date());
 }
 
 async function init() {
@@ -507,8 +568,17 @@ async function init() {
     return;
   }
   indigo = new IndigoAPI();
-  indigo.onError(e => showErr("Indigo error: " + e.message));
-  watcher = indigo.observeAll(render, 5000);
+  indigo.onError(e => {
+    if (authFailed) return;
+    lastRenderedJson = null; // so the next success is a full rebuild, not a no-op diff
+    showErr("Indigo error: " + e.message);
+  });
+  indigo.onAuthFailure(() => {
+    authFailed = true;
+    if (watcher) { watcher.stop(); watcher = null; }
+    showErr("Authentication failed — reload the page with a valid ?api-key=");
+  });
+  watcher = indigo.observeAll(render, 5000, onPollOk);
 }
 
 init();

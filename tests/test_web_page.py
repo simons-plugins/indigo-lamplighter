@@ -165,3 +165,132 @@ def test_saving_prefs_with_the_box_ticked_resyncs_the_page(install, monkeypatch,
 
     dest = _installed_dest_path(install)
     assert dest.read_bytes() == b"<html>flip-on</html>"
+
+
+def test_an_unreadable_bundle_page_blames_the_bundle_not_the_destination(install, monkeypatch, caplog):
+    """M1: a source that exists but can't be opened (permissions, whatever)
+    must not produce the generic destination-blaming WARNING -- the bundle
+    is the thing broken here, and the message has to say so."""
+    source = _bundle_source_path(install)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"<html>unreadable</html>")
+    dest = _installed_dest_path(install)
+
+    import builtins
+    real_open = builtins.open
+
+    def flaky_open(path, *args, **kwargs):
+        if str(path) == str(source):
+            raise PermissionError("permission denied")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", flaky_open)
+
+    plug = make_plugin(managePage=True)
+    with caplog.at_level("WARNING"):
+        plug._sync_web_page()  # must not raise
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert str(source) in message
+    assert "cannot be read" in message
+    assert "reinstalling the plugin restores it" in message
+    assert str(dest) not in message
+    assert not dest.exists()
+
+
+def test_a_programming_error_in_the_page_sync_is_logged_with_a_traceback_not_as_a_copy_failure(
+    install, monkeypatch, caplog
+):
+    """M2: a bug in the sync code itself (not a filesystem problem) must not
+    be folded into the friendly "copy it by hand" WARNING -- it needs a
+    traceback at ERROR, and startup still has to complete either way."""
+    def boom(_install):
+        raise TypeError("boom")
+
+    monkeypatch.setattr(plugin_module.Plugin, "_web_page_paths", staticmethod(boom))
+
+    plug = make_plugin(managePage=True)
+    with caplog.at_level("DEBUG"):
+        plug.startup()  # must not raise
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+    assert "sync failed unexpectedly" in errors[0].getMessage()
+
+    copy_warnings = [
+        r for r in caplog.records
+        if r.levelname == "WARNING" and "copy it by hand" in r.getMessage().lower()
+    ]
+    assert copy_warnings == []
+
+
+def test_a_leftover_tmp_file_is_named_in_the_warning(install, monkeypatch, caplog):
+    """M3: when the failed write's own cleanup (os.remove on the .tmp) also
+    fails, the WARNING must name the leftover file rather than silently
+    swallowing the second failure."""
+    source = _bundle_source_path(install)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"<html>new</html>")
+    dest = _installed_dest_path(install)
+
+    monkeypatch.setattr(
+        plugin_module.os, "replace",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+    monkeypatch.setattr(
+        plugin_module.os, "remove",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("remove failed too")),
+    )
+
+    plug = make_plugin(managePage=True)
+    with caplog.at_level("WARNING"):
+        plug._sync_web_page()  # must not raise
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "partial file was left at" in message
+    assert f"{dest}.tmp" in message
+    assert "delete it by hand" in message
+
+
+def test_the_stale_check_does_not_recommend_an_empty_bundle_page(install, monkeypatch, caplog):
+    """M4: an empty bundled page is a broken install, not a reason to tell
+    the user to copy it over an installed page that's actually fine."""
+    source = _bundle_source_path(install)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"")
+    dest = _installed_dest_path(install)
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"<html>installed, untouched</html>")
+
+    plug = make_plugin(managePage=False)
+    with caplog.at_level("DEBUG"):
+        plug._sync_web_page()
+
+    infos = [r for r in caplog.records if r.levelname == "INFO"]
+    assert infos == []
+    debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert len(debugs) == 1
+
+
+def test_with_the_pref_off_a_missing_bundle_page_is_still_noted(install, monkeypatch, caplog):
+    """M5: a missing bundle is a damaged install regardless of the pref --
+    it stays an INFO even with 'Manage the status page' unticked. A missing
+    *installed* page, by contrast, is nothing to report at all (DEBUG)."""
+    source = _bundle_source_path(install)
+    dest = _installed_dest_path(install)
+    assert not source.exists()
+
+    plug = make_plugin(managePage=False)
+    with caplog.at_level("DEBUG"):
+        plug._sync_web_page()
+
+    infos = [r for r in caplog.records if r.levelname == "INFO"]
+    assert len(infos) == 1
+    assert str(source) in infos[0].getMessage()
+    assert "reinstalling the plugin restores it" in infos[0].getMessage()
+    assert not dest.exists()

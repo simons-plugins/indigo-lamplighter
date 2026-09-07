@@ -86,7 +86,11 @@ MIN_LOOP_SECONDS = 0.1
 ALL_ZONES = "__all__"
 
 
-def _truthy(value, default=True):
+_TRUTHY_STRINGS = ("true", "1", "yes")
+_FALSY_STRINGS = ("false", "0", "no")
+
+
+def _truthy(value, default=True, logger=None):
     """Coerce a prefs checkbox value to bool.
 
     Indigo can hand a checkbox prop back as the STRING "false" rather than
@@ -94,11 +98,28 @@ def _truthy(value, default=True):
     True)` would silently ignore a user unticking the box. None (the pref
     was never set, e.g. an existing install upgrading past this feature)
     resolves to `default`.
+
+    Anything that is neither a bool, None, nor one of the known true/false
+    strings is unexpected -- still coerced (never raises), but noted at
+    DEBUG via `logger` when one is given, since it means some caller is
+    handing this something that isn't a checkbox value.
     """
     if value is None:
         return default
+    if isinstance(value, bool):
+        return value
     if isinstance(value, str):
-        return value.strip().lower() in ("true", "1", "yes")
+        normalized = value.strip().lower()
+        if normalized in _TRUTHY_STRINGS or normalized in _FALSY_STRINGS:
+            return normalized in _TRUTHY_STRINGS
+        if logger is not None:
+            logger.debug(f"_truthy: unrecognised value {value!r}, treating as false")
+        return False
+    if logger is not None:
+        logger.debug(
+            f"_truthy: unexpected type {type(value).__name__} for {value!r}, "
+            "coercing with bool()"
+        )
     return bool(value)
 
 
@@ -1127,52 +1148,102 @@ class Plugin(indigo.PluginBase):
         dest_dir = os.path.join(install, "Web Assets", "static", "pages")
         return source, dest_dir, os.path.join(dest_dir, WEB_PAGE_FILENAME)
 
+    @staticmethod
+    def _cleanup_tmp(tmp):
+        """Best-effort removal of a half-written temp file. Returns a note
+        to fold into a failure warning when even the cleanup fails, so a
+        leftover ``.tmp`` is never left unmentioned for the user to trip
+        over later -- empty string when there is nothing to add."""
+        if tmp is None:
+            return ""
+        try:
+            os.remove(tmp)
+        except OSError:
+            return f" A partial file was left at {tmp}; delete it by hand."
+        return ""
+
     def _warn_if_managed_page_is_stale(self):
         """Pref is OFF, so no write happens -- but a stale installed page is
-        worth one INFO. Read-only and best-effort: any failure here
-        (missing bundle, permissions, whatever) is DEBUG only, because an
-        opted-out user must not get WARNINGs about a file the plugin isn't
-        managing."""
+        worth one INFO. Read-only and best-effort: a filesystem problem
+        (missing bundle aside, which is its own INFO -- a damaged install
+        regardless of the pref) is DEBUG only, because an opted-out user
+        must not get WARNINGs about a file the plugin isn't managing. A
+        genuine programming error still gets a traceback, not silence."""
         try:
             install = indigo.server.getInstallFolderPath()
             source, _dest_dir, dest = self._web_page_paths(install)
-            if not (os.path.isfile(source) and os.path.isfile(dest)):
+
+            if not os.path.isfile(source):
+                self.logger.info(
+                    f"Bundled Lamplighter status page missing at {source}; "
+                    "reinstalling the plugin restores it."
+                )
                 return
+            if not os.path.isfile(dest):
+                self.logger.debug(
+                    f"No installed Lamplighter status page at {dest} to check for staleness."
+                )
+                return
+
             with open(source, "rb") as handle:
                 source_bytes = handle.read()
             with open(dest, "rb") as handle:
                 dest_bytes = handle.read()
-            if source_bytes != dest_bytes:
+
+            # An empty bundled page is a broken install, not a reason to
+            # recommend copying it over a page that's actually fine.
+            if source_bytes and source_bytes != dest_bytes:
                 self.logger.info(
                     f"Lamplighter status page management is off, and the installed "
                     f"page ({dest}) differs from the bundled one (v{self.pluginVersion}) "
                     "- update it by hand, or re-tick 'Manage the status page' to have "
                     "the plugin do it."
                 )
-        except Exception as exc:  # pylint: disable=broad-except
+            else:
+                self.logger.debug(
+                    f"Lamplighter status page at {dest} matches the bundled copy, or "
+                    "the bundled copy is empty -- nothing to note."
+                )
+        except OSError as exc:
             self.logger.debug(f"Could not check the installed status page for staleness: {exc}")
+        except Exception:  # pylint: disable=broad-except
+            self.logger.exception("Lamplighter status page staleness check failed unexpectedly")
 
     def _sync_web_page(self, prefs=None):
         """Install/update the bundled status page into Web Assets on startup
         and on every prefs save, so users stop manually copying it after
         every change.
 
-        Must NEVER raise out of startup: the whole body is one try/except,
-        and every failure path -- missing bundle, empty bundle, unreadable/
-        unwritable destination -- is a WARNING naming the destination path
-        and the retry path, so the user can copy the file by hand instead.
-        When the pref is off, no write happens, but `_warn_if_managed_page_
-        is_stale` still flags a stale installed copy at INFO.
+        Must NEVER raise out of startup: a filesystem problem -- missing
+        bundle, empty bundle, unreadable/unwritable destination -- is a
+        WARNING naming the affected path and the retry path, so the user can
+        copy the file by hand instead. A genuine programming error (a bug in
+        this method, not a bad filesystem) still gets a traceback at ERROR
+        rather than being folded into that WARNING's "copy it by hand"
+        message. When the pref is off, no write happens, but
+        `_warn_if_managed_page_is_stale` still flags a stale installed copy
+        at INFO.
         """
         prefs = self.pluginPrefs if prefs is None else prefs
-        if not _truthy(prefs.get("managePage")):
+        if not _truthy(prefs.get("managePage"), logger=self.logger):
             self._warn_if_managed_page_is_stale()
             return
 
         dest = None
         tmp = None
         try:
-            install = indigo.server.getInstallFolderPath()
+            try:
+                install = indigo.server.getInstallFolderPath()
+            except Exception as exc:  # pylint: disable=broad-except
+                self.logger.warning(
+                    "Could not determine the Indigo install folder "
+                    f"({exc}) - cannot install/update the Lamplighter status page "
+                    f"at Web Assets/static/pages/{WEB_PAGE_FILENAME} under your "
+                    "Indigo installation folder. The plugin will retry at the next "
+                    "config save or plugin restart."
+                )
+                return
+
             source, dest_dir, dest = self._web_page_paths(install)
 
             if not os.path.isfile(source):
@@ -1183,8 +1254,15 @@ class Plugin(indigo.PluginBase):
                 )
                 return
 
-            with open(source, "rb") as handle:
-                source_bytes = handle.read()
+            try:
+                with open(source, "rb") as handle:
+                    source_bytes = handle.read()
+            except OSError as exc:
+                self.logger.warning(
+                    f"The bundled Lamplighter status page at {source} cannot be "
+                    f"read ({exc}) - reinstalling the plugin restores it."
+                )
+                return
 
             if not source_bytes:
                 self.logger.warning(
@@ -1215,17 +1293,16 @@ class Plugin(indigo.PluginBase):
                 f"(v{self.pluginVersion} -> managed by the plugin; untick 'Manage the "
                 "status page' to hand-edit it)"
             )
-        except Exception as exc:  # pylint: disable=broad-except
-            if tmp is not None:
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
+        except OSError as exc:
+            leftover = self._cleanup_tmp(tmp)
             where = dest or f"Web Assets/static/pages/{WEB_PAGE_FILENAME}"
             self.logger.warning(
                 f"Could not install/update the Lamplighter status page at {where}: "
-                f"{exc}. Copy the bundled copy (Contents/Resources/pages/"
+                f"{exc}.{leftover} Copy the bundled copy (Contents/Resources/pages/"
                 f"{WEB_PAGE_FILENAME} inside the plugin bundle) there by hand, or "
                 "untick 'Manage the status page' to stop the plugin trying. The "
                 "plugin will retry at the next config save or plugin restart."
             )
+        except Exception:  # pylint: disable=broad-except
+            self._cleanup_tmp(tmp)
+            self.logger.exception("Lamplighter status page sync failed unexpectedly")
