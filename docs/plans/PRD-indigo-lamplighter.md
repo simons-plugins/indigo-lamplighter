@@ -52,7 +52,7 @@ because it does not have that rule.
 
 - Colour temperature. Driven from Apple Home over Matter and by existing CCT
   triggers today; stays there.
-- A configuration web page. A read-only status page is a v2 candidate.
+- A configuration web page. (The read-only status page shipped in 2026.3.0; it stays read-only.)
 - Scenes, schedules, holiday modes, energy accounting.
 - Replacing Occupatum for anything other than lighting zones.
 - Binding wall controls to zones (so the plugin knows a dimmer *is* the
@@ -486,7 +486,7 @@ handler follows the configured level from startup.
   `1949753199` *is* the control for the strips group. The plugin then mirrors
   press/dial itself (retiring the `indigo-scripts` wall_mirror triggers), and
   an override is known from the control, not inferred from the light.
-- **Read-only status page** through IWS: zones, states, explain, counters.
+- **Read-only status page** through IWS — shipped in 2026.3.0 (see README "Status page"): zones, state, explain, period, lux, presence, override, desired levels, counters.
 - **Adaptive hold**: learn `hold_seconds` per zone from presence gap
   statistics (the Dining study: 5 min bridges 69 % of gaps, 55 min needed).
 - **Scenes** as named level sets a period or an action can reference.

@@ -52,7 +52,7 @@ CONTROLLER_TYPE_ID = "lamplighter_controller"
 
 CONFIG_FILENAME = "lamplighter.json"
 
-#: The bundled status page (PRD: read-only view of every zone) and where it
+#: The bundled status page (PRD §12 "read-only status page", shipped 2026.3.0) and where it
 #: is copied from/into. Mirrors indigo-unifi-protect's cameras.html plumbing
 #: (issue #27 there) so the pattern is consistent across the workspace.
 WEB_PAGE_FILENAME = "lamplighter.html"
@@ -100,9 +100,10 @@ def _truthy(value, default=True, logger=None):
     resolves to `default`.
 
     Anything that is neither a bool, None, nor one of the known true/false
-    strings is unexpected -- still coerced (never raises), but noted at
-    DEBUG via `logger` when one is given, since it means some caller is
-    handing this something that isn't a checkbox value.
+    strings is unexpected -- still coerced, never raises: an unrecognised
+    string is False, any other type is `bool(value)`. Noted at DEBUG via
+    `logger` when one is given, since it means some caller is handing this
+    something that isn't a checkbox value.
     """
     if value is None:
         return default
@@ -1164,11 +1165,12 @@ class Plugin(indigo.PluginBase):
 
     def _warn_if_managed_page_is_stale(self):
         """Pref is OFF, so no write happens -- but a stale installed page is
-        worth one INFO. Read-only and best-effort: a filesystem problem
-        (missing bundle aside, which is its own INFO -- a damaged install
-        regardless of the pref) is DEBUG only, because an opted-out user
-        must not get WARNINGs about a file the plugin isn't managing. A
-        genuine programming error still gets a traceback, not silence."""
+        worth one INFO. Read-only and best-effort: a filesystem problem is
+        DEBUG only, because an opted-out user must not get WARNINGs about a
+        file the plugin isn't managing. The one exception is a missing
+        bundled page, which is INFO regardless of the pref -- that is a
+        damaged install, not a management choice. A genuine programming
+        error still gets a traceback."""
         try:
             install = indigo.server.getInstallFolderPath()
             source, _dest_dir, dest = self._web_page_paths(install)
@@ -1214,15 +1216,16 @@ class Plugin(indigo.PluginBase):
         and on every prefs save, so users stop manually copying it after
         every change.
 
-        Must NEVER raise out of startup: a filesystem problem -- missing
-        bundle, empty bundle, unreadable/unwritable destination -- is a
-        WARNING naming the affected path and the retry path, so the user can
-        copy the file by hand instead. A genuine programming error (a bug in
-        this method, not a bad filesystem) still gets a traceback at ERROR
-        rather than being folded into that WARNING's "copy it by hand"
-        message. When the pref is off, no write happens, but
-        `_warn_if_managed_page_is_stale` still flags a stale installed copy
-        at INFO.
+        Must NEVER raise out of startup: a filesystem problem is a WARNING
+        naming the affected path and the way out: bundle problems (missing,
+        unreadable, empty) say to reinstall the plugin; destination problems
+        (install folder unknown, unreadable/unwritable Web Assets) say to
+        copy the file by hand and that the plugin retries on the next prefs
+        save or restart. A genuine programming error (a bug in this method,
+        not a bad filesystem) still gets a traceback at ERROR rather than
+        being folded into that WARNING's message. When the pref is off, no
+        write happens, but `_warn_if_managed_page_is_stale` still flags a
+        stale installed copy at INFO.
         """
         prefs = self.pluginPrefs if prefs is None else prefs
         if not _truthy(prefs.get("managePage"), logger=self.logger):

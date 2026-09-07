@@ -79,7 +79,7 @@ padding:6px 0;cursor:pointer;min-height:32px;display:flex;align-items:center;gap
 </div>
 
 <script>
-// -- indigo-api.js V1 (inlined; pages must be self-contained) --
+// -- indigo-api.js V1, inlined (pages must be self-contained) and modified: read-only, observe()/observeAll() call back on every fetch and take an onOk hook -- see the comments on observe(). --
 class IndigoAPI {
     constructor(config) {
         const cfg = config || window.INDIGO_CONFIG || IndigoAPI._configFromURL();
@@ -272,8 +272,8 @@ const NAME_PREFIX = /^Lamplighter - /;
 const $ = id => document.getElementById(id);
 let indigo = null, watcher = null;
 let openIds = new Set();         // disclosures the user has opened, kept open across re-renders
-let deviceNames = {};            // id -> name, refreshed every poll
-let lastRenderedJson = null;     // gates the DOM rebuild only -- see render()
+let deviceNames = {};            // id -> name, rebuilt whenever render() rebuilds the DOM (payload changed)
+let lastRenderedJson = null;     // gates the DOM rebuild only; reset to null on any error so the next success rebuilds -- see render()
 let authFailed = false;
 
 function showErr(msg) {
@@ -412,6 +412,8 @@ function renderHeader(ctrl) {
 
 // A device's on/off arrives at the top level as `onState` over the REST API;
 // `onOffState` only exists inside `states`. A zone that is off is disabled.
+// The `states.onOffState` fallback covers a payload that omits `onState` (a
+// device still starting); it deliberately never overrides a present `onState`.
 function isOff(dev) {
   if (dev.onState === false) return true;
   const st = dev.states || {};
@@ -564,7 +566,7 @@ function onPollOk() {
 
 async function init() {
   if (typeof IndigoAPI === "undefined" || !IndigoAPI.isConfigured()) {
-    showErr("Not connected to Indigo. Open this page from the Indigo server or the Domio app.");
+    showErr("Not connected to Indigo. Open this page from the Indigo server or the dom.io app.");
     return;
   }
   indigo = new IndigoAPI();
