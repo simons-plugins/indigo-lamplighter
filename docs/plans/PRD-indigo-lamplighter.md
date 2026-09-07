@@ -69,7 +69,7 @@ fix, with the evidence. These are the acceptance criteria, not background.
 |---|---|---|
 | R1 | Manual override is judged from the device-change **transition** (before-state at desired, after-state off desired), per device, never from a live re-read. | Fork #15: revert landed first, live read saw nothing. 2026-09-03 19:46:35, transition rule locked 112 ms after the command. |
 | R2 | Our own writes never create an override: we only command devices that are off desired, so every echo starts off desired. | Fork attempt 1 (194e6af) locked on every ramp step. |
-| R3 | An echo of our command that arrives after the desired level moved back onto the device's pre-command state is still ours: remember the state each device was commanded away from, 15 s, consumed once. | Review of #16: in-room lux rises → not dark → lights off → delayed on-echo read as override. |
+| R3 | An echo of our command that arrives after the desired level moved back onto the device's pre-command state is still ours: remember the state each device was commanded away from, 30 s, consumed once. | Review of #16: in-room lux rises → not dark → lights off → delayed on-echo read as override. Raised from 15 s to 30 s (review of #5, `fix/recheck-30s`): the window must cover the longest time a command can sit un-transmitted, which is what the reconciler's `COMMAND_RECHECK_SECONDS` is sized to, after a 28 s Z-Wave transmit delay was observed. |
 | R4 | A zone re-plans only when an **input** changes: presence on/off, presence last-seen crossing the hold, lux crossing the (hysteresis-widened) threshold, a period boundary, an override starting or ending. Not on any device update. Presence itself may come from an Indigo variable as well as a device (`presence_variables`), on the same any-of, edge-gated terms. A period may carry its own `hold_seconds`, overriding the zone's while it is active; the hold judged is always the one for the period active at that moment, so a period boundary can itself lengthen or shorten a hold already running. | Occupatum ticked every 1.2 s → hundreds of re-plans an hour → reverts within a second, 10 s callback lag. |
 | R5 | Brightness comparisons use a proportional band: `max(1, ceil(10 % of target))`, with 0 and 100 exact. | zigbee2mqtt truncates both ways (30 → 29); a group dimmer reads back 45..48 for 50. |
 | R6 | A late reporter (a device whose state arrives seconds or more after the command) is neither retried nor suppressed nor treated as an override; it is reconciled when it finally reports. | Under the fork's 2 s confirm-and-suppress machinery, any light that had not reported by the re-check could read as a manual override; the workaround was `exclude_from_lock_dev_ids`. |
@@ -241,7 +241,7 @@ The rule from the fork, unchanged, because it is proven:
 2. The before-state is at the desired level (R5 band).
 3. The after-state is not.
 4. The transition's starting state is not one the plugin commanded the device
-   away from inside `echo_window_seconds` (15). Each command excuses one
+   away from inside `echo_window_seconds` (30). Each command excuses one
    transition.
 
 Applied on every `deviceUpdated` for a zone light, on the callback thread,
@@ -314,7 +314,7 @@ presence survive an edit.
 {
   "version": 1,
   "reconcile_seconds": 60,
-  "echo_window_seconds": 15,
+  "echo_window_seconds": 30,
   "zones": [
     {
       "name": "Kitchen",

@@ -154,7 +154,11 @@ class Config:
     version: int
     zones: tuple[ZoneConfig, ...]
     reconcile_seconds: int = 60
-    echo_window_seconds: int = 15
+    #: The echo window must cover the longest time a command can sit
+    #: un-transmitted, which is what the re-check window
+    #: (``COMMAND_RECHECK_SECONDS`` in ``reconcile.py``) is sized to; keep
+    #: the two equal unless you know why not.
+    echo_window_seconds: int = 30
 
 
 # ------------------------------------------------------------- validators
@@ -592,8 +596,12 @@ def load_config(source, sun: SunProvider, today: dt.date) -> Config:
         )
 
     reconcile_seconds = _int(doc.get("reconcile_seconds", 60), "reconcile_seconds", minimum=10)
+    # The echo window must cover the longest time a command can sit
+    # un-transmitted, which is what the re-check window
+    # (``COMMAND_RECHECK_SECONDS`` in ``reconcile.py``) is sized to; keep the
+    # two equal unless you know why not.
     echo_window_seconds = _int(
-        doc.get("echo_window_seconds", 15), "echo_window_seconds", minimum=1, maximum=120
+        doc.get("echo_window_seconds", 30), "echo_window_seconds", minimum=1, maximum=120
     )
 
     zones = []

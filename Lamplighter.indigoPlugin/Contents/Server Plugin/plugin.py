@@ -24,7 +24,7 @@ plugin nobody can trust with the rest of the house.
 
 **A configuration that does not load does not stop the one that does.** The
 watcher records the file's mtime whether the load succeeded or not, so a
-broken save is reported once per edit rather than every five seconds, and
+broken save is reported once per edit rather than every ``CONFIG_CHECK_SECONDS``, and
 the previous configuration keeps running until a good one replaces it.
 """
 
@@ -874,7 +874,7 @@ class Plugin(indigo.PluginBase):
             return False
         # Recorded before the load is attempted, and whether or not it works:
         # a file that will not parse must be complained about once per edit,
-        # not once every five seconds until somebody fixes it.
+        # not once every ``CONFIG_CHECK_SECONDS`` until somebody fixes it.
         self._config_mtime = mtime
 
         config, complaint = self._read_config()

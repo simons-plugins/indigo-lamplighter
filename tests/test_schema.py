@@ -416,7 +416,7 @@ def test_every_object_refuses_unknown_keys():
 
 def test_defaults_documented_here_are_the_ones_the_prd_states():
     assert SCHEMA["properties"]["reconcile_seconds"]["default"] == 60
-    assert SCHEMA["properties"]["echo_window_seconds"]["default"] == 15
+    assert SCHEMA["properties"]["echo_window_seconds"]["default"] == 30
     zone_override = SCHEMA["$defs"]["zone_override"]["properties"]
     assert zone_override["duration_minutes"]["default"] == 60
     assert zone_override["extend_minutes"]["default"] == 0

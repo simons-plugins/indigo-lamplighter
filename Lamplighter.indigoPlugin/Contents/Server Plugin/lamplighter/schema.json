@@ -21,8 +21,8 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 120,
-      "default": 15,
-      "description": "How long a state the plugin commanded a device AWAY from stays on record as an excuse for one transition (R3). An echo of our own command can arrive after the desired level has already moved back onto the device's pre-command state; without this window that echo reads as a manual override. Each recorded command excuses exactly one transition and then is consumed. Default 15. Longer windows forgive slower hardware but also swallow a genuine dial move made within the window (the documented cost, fork test M12d)."
+      "default": 30,
+      "description": "How long a state the plugin commanded a device AWAY from stays on record as an excuse for one transition (R3). An echo of our own command can arrive after the desired level has already moved back onto the device's pre-command state; without this window that echo reads as a manual override. Each recorded command excuses exactly one transition and then is consumed. Default 30: the echo window must cover the longest time a command can sit un-transmitted, which is what the reconciler's COMMAND_RECHECK_SECONDS re-check window is sized to; keep the two equal unless you know why not. Longer windows forgive slower hardware but also swallow a genuine dial move made within the window (the documented cost, fork test M12d)."
     },
     "zones": {
       "type": "array",

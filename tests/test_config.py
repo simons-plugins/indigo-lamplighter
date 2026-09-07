@@ -74,7 +74,7 @@ def test_levels_are_keyed_by_int_device_id():
 def test_the_documented_defaults_are_the_ones_applied():
     config = load()
     zone = config.zones[0]
-    assert (config.reconcile_seconds, config.echo_window_seconds) == (60, 15)
+    assert (config.reconcile_seconds, config.echo_window_seconds) == (60, 30)
     assert zone.enabled is True
     assert zone.override == OverrideConfig(
         enabled=True,
@@ -86,6 +86,24 @@ def test_the_documented_defaults_are_the_ones_applied():
     assert zone.periods[0].adjust_by_lux is False
     assert zone.periods[0].limit is None
     assert zone.periods[0].override is None
+
+
+def test_the_default_echo_window_covers_the_command_recheck():
+    """The echo window excuses a device's own delayed report of a command we
+    sent; it must stay at least as long as the reconciler's re-check window
+    (COMMAND_RECHECK_SECONDS), the longest time a command can sit
+    un-transmitted before the Z-Wave/Zigbee plugin gets to it. A shorter
+    default would let a re-plan that lands in that gap read our own echo as
+    a manual override.
+
+    Kills: the echo window default drifting back below the re-check window
+    (e.g. someone reverting it to 15 without noticing the two are meant to
+    move together).
+    """
+    from lamplighter.reconcile import COMMAND_RECHECK_SECONDS
+
+    config = load()
+    assert config.echo_window_seconds >= COMMAND_RECHECK_SECONDS
 
 
 def test_a_lux_block_takes_its_own_defaults():
