@@ -69,6 +69,27 @@ for a worked file and
 `Lamplighter.indigoPlugin/Contents/Server Plugin/lamplighter/schema.json`
 for the schema.
 
+## Status page
+
+The plugin bundles a read-only status page showing every zone's state, why
+it holds that state, its current period, lux verdict, presence, any manual
+override (with its expiry), the level it wants for each light, and today's
+counters, plus a header from the controller device: enabled/disabled, zone
+counts, config status and today's totals. It is copied into Indigo's Web
+Assets on startup (and on
+every prefs save with **"Manage the status page"** ticked), the same way
+[indigo-unifi-protect](https://github.com/simons-plugins/indigo-unifi-protect)
+manages its Cameras page, and served at:
+
+```
+https://<indigo-host>:8176/static/pages/lamplighter.html?api-key=<your-key>
+```
+
+The `?api-key=` form is how the page authenticates outside the dom.io app.
+Untick **"Manage the status page"** in the plugin's configuration if you
+hand-edit the installed copy — otherwise your changes are overwritten on the
+next start or config save.
+
 ## Development
 
 ```sh

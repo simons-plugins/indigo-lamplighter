@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+<meta name="indigo-page-name" content="Lamplighter">
+<meta name="indigo-page-icon" content="lamp.fill">
+<meta name="indigo-page-description" content="Live zone status for the Lamplighter presence/daylight lighting engine">
+<title>Lamplighter</title>
+<style>
+:root{--bg:#f7f4ef;--card-bg:#fff;--text:#1d1a15;--text-secondary:#8a8378;--border:#e2dbcd;
+--accent:#c9822f;--on-color:#3a9d5c;--warn:#c9822f;--bad:#c1442c;--muted:#a39b8c;
+--chip-bg:#efe9dc;--shadow:0 1px 3px rgba(0,0,0,.08)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17140f;--card-bg:#241f18;
+--text:#f2ede2;--text-secondary:#a89f8f;--border:#3a342a;--accent:#e0a04b;--on-color:#4cb772;
+--warn:#e0a04b;--bad:#e0654a;--muted:#6f6858;--chip-bg:#2e281f;--shadow:0 1px 3px rgba(0,0,0,.4)}}
+:root[data-theme="dark"]{--bg:#17140f;--card-bg:#241f18;--text:#f2ede2;--text-secondary:#a89f8f;
+--border:#3a342a;--accent:#e0a04b;--on-color:#4cb772;--warn:#e0a04b;--bad:#e0654a;--muted:#6f6858;
+--chip-bg:#2e281f;--shadow:0 1px 3px rgba(0,0,0,.4)}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;
+background:var(--bg);color:var(--text);font-size:17px;-webkit-font-smoothing:antialiased;
+padding:16px;padding-top:max(16px,env(safe-area-inset-top));
+padding-bottom:max(32px,env(safe-area-inset-bottom));
+padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
+.wrap{max-width:1100px;margin:0 auto}
+h1{font-size:28px;margin:0 0 4px;letter-spacing:-.02em}
+.updated{font-size:13px;color:var(--text-secondary);margin-bottom:14px;font-variant-numeric:tabular-nums}
+.banner{border-radius:10px;padding:12px 14px;font-size:15px;line-height:1.4;margin-bottom:14px;display:none}
+.banner.show{display:block}
+.banner.bad{background:rgba(193,68,44,.14);color:var(--bad);border:1px solid rgba(193,68,44,.3)}
+.hdr{background:var(--card-bg);border-radius:14px;box-shadow:var(--shadow);padding:14px 16px;
+margin-bottom:16px;display:flex;flex-wrap:wrap;gap:10px 20px;align-items:center;font-size:14px;
+color:var(--text-secondary)}
+.hdr b{color:var(--text);font-weight:600}
+.hdr .sep{color:var(--border)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.card{background:var(--card-bg);border-radius:14px;box-shadow:var(--shadow);padding:16px}
+.card.disabled{opacity:.6}
+.crow{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px}
+.zname{font-size:18px;font-weight:600;letter-spacing:-.01em}
+.chip{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;
+padding:4px 10px;border-radius:999px;white-space:nowrap;flex:0 0 auto}
+.chip.occupied{background:rgba(58,157,92,.16);color:var(--on-color)}
+.chip.vacant{background:var(--chip-bg);color:var(--text-secondary)}
+.chip.overridden{background:rgba(201,130,47,.18);color:var(--warn)}
+.chip.offduty{background:var(--chip-bg);color:var(--muted)}
+.chip.disabled{background:var(--chip-bg);color:var(--muted)}
+.chip.unknown{background:var(--chip-bg);color:var(--muted)}
+.facts{font-size:13px;color:var(--text-secondary);margin-bottom:10px;line-height:1.5}
+.facts span{white-space:nowrap}
+.facts span+span:before{content:" · "}
+.explain{font-size:14px;line-height:1.5;color:var(--text);margin-bottom:12px}
+.foot{border-top:1px solid var(--border);padding-top:10px;font-size:13px}
+.disclosure{background:none;border:none;color:var(--accent);font:inherit;font-size:13px;font-weight:600;
+padding:6px 0;cursor:pointer;min-height:32px;display:flex;align-items:center;gap:6px;width:100%;text-align:left}
+.disclosure .tri{display:inline-block;transition:transform .15s ease;font-size:11px}
+.disclosure[aria-expanded="true"] .tri{transform:rotate(90deg)}
+@media (prefers-reduced-motion:reduce){.disclosure .tri{transition:none}}
+.lights{list-style:none;margin:2px 0 10px;padding:0;font-size:13px}
+.lights li{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border)}
+.lights li:last-child{border-bottom:none}
+.lights .lvl{color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.counters{color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.empty{color:var(--text-secondary);text-align:center;padding:40px 16px;font-size:15px}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Lamplighter</h1>
+<div class="updated" id="updated"></div>
+<div id="err" class="banner bad"></div>
+
+<div class="hdr" id="hdr" hidden></div>
+
+<div id="empty" class="empty" hidden>No Lamplighter zones found.</div>
+<div class="grid" id="grid"></div>
+</div>
+
+<script>
+// -- indigo-api.js V1, inlined (pages must be self-contained) and modified: read-only, observe()/observeAll() call back on every fetch and take an onOk hook -- see the comments on observe(). --
+class IndigoAPI {
+    constructor(config) {
+        const cfg = config || window.INDIGO_CONFIG || IndigoAPI._configFromURL();
+        if (!cfg || !cfg.baseURL || !cfg.apiKey) {
+            this._configured = false;
+            this._showConfigError();
+            return;
+        }
+        this._configured = true;
+        this._baseURL = cfg.baseURL.replace(/\/+$/, "");
+        this._apiKey = cfg.apiKey;
+        this._errorHandler = null;
+        this._authFailureHandler = null;
+    }
+
+    static isConfigured() {
+        const cfg = window.INDIGO_CONFIG || IndigoAPI._configFromURL();
+        return !!(cfg && cfg.baseURL && cfg.apiKey);
+    }
+
+    static _configFromURL() {
+        if (typeof location === "undefined") return null;
+        const params = new URLSearchParams(location.search);
+        const apiKey = params.get("api-key");
+        if (!apiKey) return null;
+        return { baseURL: location.origin, apiKey };
+    }
+
+    async getDevices() {
+        return this._getList("/v2/api/indigo.devices");
+    }
+
+    async getDevice(id) {
+        return this._get(`/v2/api/indigo.devices/${id}`);
+    }
+
+    // Read-only page: this class keeps the shared IndigoAPI shape from the
+    // skill reference, but the command helpers (turnOn/setBrightness/etc.)
+    // are intentionally omitted — Lamplighter status never sends commands.
+
+    // Self-scheduling: the next poll is only queued once the current one has
+    // settled (in `finally`), so a slow endpoint cannot stack overlapping
+    // requests or deliver them out of order. `callback` runs on every
+    // successful fetch, raw payload and all; `onOk`, when given, also runs on
+    // every successful fetch, before `callback` -- callers use it for things
+    // like an "updated" timestamp or clearing a transport error banner, kept
+    // separate so `callback` is free to do its own diffing for a DOM rebuild
+    // without that diff swallowing onOk's per-poll bookkeeping.
+    observe(deviceId, callback, intervalMs = 5000, onOk = null) {
+        return this._pollLoop(() => this.getDevice(deviceId), callback, intervalMs, onOk);
+    }
+
+    observeAll(callback, intervalMs = 5000, onOk = null) {
+        return this._pollLoop(() => this.getDevices(), callback, intervalMs, onOk);
+    }
+
+    _pollLoop(fetchFn, callback, intervalMs, onOk) {
+        let stopped = false;
+        let timer = null;
+        const poll = async () => {
+            try {
+                const result = await fetchFn();
+                if (onOk) { try { onOk(result); } catch (_) { /* caller's problem, not ours */ } }
+                callback(result);
+            } catch (err) {
+                this._handleError(err);
+            } finally {
+                if (!stopped) timer = setTimeout(poll, intervalMs);
+            }
+        };
+        poll();
+        return { stop: () => { stopped = true; if (timer !== null) clearTimeout(timer); } };
+    }
+
+    onError(callback) {
+        this._errorHandler = callback;
+    }
+
+    onAuthFailure(callback) {
+        this._authFailureHandler = callback;
+    }
+
+    async _get(path) {
+        return this._fetch(path, { method: "GET" });
+    }
+
+    async _getList(path) {
+        return this._fetch(path, { method: "GET" });
+    }
+
+    async _fetch(path, options = {}) {
+        this._requireConfigured();
+
+        const url = `${this._baseURL}${path}`;
+        const headers = {
+            Authorization: `Bearer ${this._apiKey}`,
+            Accept: "application/json",
+            ...options.headers,
+        };
+
+        let response;
+        try {
+            response = await fetch(url, { ...options, headers });
+        } catch (err) {
+            const error = new IndigoAPIError("Network error: " + err.message, 0, err);
+            this._handleError(error);
+            throw error;
+        }
+
+        if (response.status === 401 || response.status === 403) {
+            const error = new IndigoAPIError(
+                "Authentication failed — check your API key",
+                response.status
+            );
+            if (this._authFailureHandler) this._authFailureHandler(error);
+            this._handleError(error);
+            throw error;
+        }
+
+        if (!response.ok) {
+            const text = await response.text().catch(() => "");
+            const error = new IndigoAPIError(
+                `HTTP ${response.status}: ${text || response.statusText}`,
+                response.status
+            );
+            this._handleError(error);
+            throw error;
+        }
+
+        const contentType = response.headers.get("Content-Type") || "";
+        if (!contentType.includes("json")) return null;
+
+        try {
+            return await response.json();
+        } catch (err) {
+            const error = new IndigoAPIError("Invalid JSON response", response.status, err);
+            this._handleError(error);
+            throw error;
+        }
+    }
+
+    _requireConfigured() {
+        if (!this._configured) {
+            throw new IndigoAPIError(
+                "IndigoAPI is not configured — window.INDIGO_CONFIG is missing or incomplete",
+                0
+            );
+        }
+    }
+
+    _handleError(error) {
+        if (this._errorHandler) {
+            try { this._errorHandler(error); } catch (_) { /* prevent handler errors from cascading */ }
+        }
+    }
+
+    _showConfigError() {
+        if (typeof document === "undefined") return;
+        const banner = document.createElement("div");
+        banner.id = "indigo-config-error";
+        banner.style.cssText =
+            "position:fixed;top:0;left:0;right:0;padding:12px 16px;" +
+            "background:#dc3545;color:#fff;font:14px/1.4 -apple-system,sans-serif;" +
+            "text-align:center;z-index:99999;";
+        banner.textContent = "Indigo connection not configured. Set window.INDIGO_CONFIG or add ?api-key= to the URL.";
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", () => document.body.prepend(banner));
+        } else {
+            document.body.prepend(banner);
+        }
+    }
+}
+
+class IndigoAPIError extends Error {
+    constructor(message, status, cause) {
+        super(message);
+        this.name = "IndigoAPIError";
+        this.status = status;
+        if (cause) this.cause = cause;
+    }
+}
+</script>
+<script>
+// ── page logic ──────────────────────────────────────────────────────────
+const PLUGIN_ID = "com.simons-plugins.indigo-lamplighter";
+const ZONE_TYPE = "lamplighter_zone";
+const CTRL_TYPE = "lamplighter_controller";
+const NAME_PREFIX = /^Lamplighter - /;
+
+const $ = id => document.getElementById(id);
+let indigo = null, watcher = null;
+let openIds = new Set();         // disclosures the user has opened, kept open across re-renders
+let deviceNames = {};            // id -> name, rebuilt whenever render() rebuilds the DOM (payload changed)
+let lastRenderedJson = null;     // gates the DOM rebuild only; reset to null on any error so the next success rebuilds -- see render()
+let authFailed = false;
+
+function showErr(msg) {
+  const el = $("err");
+  el.textContent = msg;
+  el.classList.toggle("show", !!msg);
+}
+
+function fmtTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtClock(d) {
+  return d.toLocaleTimeString([], { hour12: false });
+}
+
+function zoneName(dev) {
+  return (dev.name || "").replace(NAME_PREFIX, "");
+}
+
+function stateChip(dev, s) {
+  if (isOff(dev)) return { cls: "disabled", label: "DISABLED" };
+  const explain = s.explain || "";
+  switch (s.state) {
+    case "occupied": return { cls: "occupied", label: "OCCUPIED" };
+    case "vacant": return { cls: "vacant", label: "VACANT" };
+    case "overridden": {
+      let until = "";
+      if (s.override_expires) until = fmtTime(s.override_expires) || "?";
+      return { cls: "overridden", label: "OVERRIDDEN" + (until ? " · until " + until : "") };
+    }
+    case "off_duty": {
+      let extra = "";
+      if (explain.includes("bright")) extra = " · bright";
+      else if (explain.includes("disabled")) extra = " · disabled";
+      return { cls: "offduty", label: "OFF DUTY" + extra };
+    }
+    default: return { cls: "vacant", label: (s.state || "UNKNOWN").toUpperCase() };
+  }
+}
+
+function presenceFact(s) {
+  if (s.presence_active === true) return "here";
+  if (s.presence_last_seen) return "hold, last seen " + fmtTime(s.presence_last_seen);
+  if (s.presence_active == null) return "presence unknown";
+  return "never seen";
+}
+
+function luxFact(s) {
+  if (s.dark == null) return "lux unknown";
+  const dark = s.dark === true;
+  const label = dark ? "dark" : "bright";
+  if (s.lux !== "" && s.lux != null) {
+    const n = Math.round(parseFloat(s.lux));
+    if (!isNaN(n)) return label + " (" + n + " lx)";
+  }
+  return label;
+}
+
+function parseDesired(summary) {
+  // "144694384=100, 772478931=50, ..." -> { items: [{id, level}], unparsedCount }
+  if (typeof summary !== "string" || !summary) return { items: [], unparsedCount: 0 };
+  const items = [];
+  let unparsedCount = 0;
+  for (const pair of summary.split(",").map(p => p.trim()).filter(Boolean)) {
+    const eq = pair.indexOf("=");
+    const id = eq < 0 ? "" : pair.slice(0, eq).trim();
+    if (eq < 0 || !id) { unparsedCount++; continue; }
+    items.push({ id, level: pair.slice(eq + 1).trim() });
+  }
+  return { items, unparsedCount };
+}
+
+function levelLabel(level) {
+  if (level === "leave") return "left alone";
+  if (level === "off") return "off";
+  if (level === "on") return "on";
+  const n = parseInt(level, 10);
+  if (!isNaN(n) && String(n) === level) return n + " %";
+  return level;
+}
+
+function lightName(id) {
+  return deviceNames[id] || ("#" + id);
+}
+
+// `parts` is a mix of plain strings (rendered as text) and
+// { text, style } objects (rendered inside a <b>) -- never raw HTML, since
+// `config_status` in particular is free-form text from the loader that may
+// echo back content of the config file.
+function addParts(hdr, parts) {
+  const span = document.createElement("span");
+  for (const part of parts) {
+    if (typeof part === "string") {
+      span.appendChild(document.createTextNode(part));
+      continue;
+    }
+    const b = document.createElement("b");
+    if (part.style) b.style.cssText = part.style;
+    b.textContent = part.text;
+    span.appendChild(b);
+  }
+  hdr.appendChild(span);
+}
+
+function renderHeader(ctrl) {
+  const hdr = $("hdr");
+  if (!ctrl) { hdr.hidden = true; return; }
+  const s = ctrl.states || {};
+  hdr.hidden = false;
+  hdr.textContent = "";
+  addParts(hdr, [{
+    text: isOff(ctrl) ? "Disabled" : "Enabled",
+    style: isOff(ctrl) ? "color:var(--bad)" : "color:var(--on-color)",
+  }]);
+  const total = s.zones != null ? s.zones : "?";
+  const enabled = s.zones_enabled != null ? s.zones_enabled : "?";
+  const overridden = s.zones_overridden != null ? s.zones_overridden : 0;
+  addParts(hdr, [
+    { text: String(total) }, " zones (", { text: String(enabled) }, " enabled, ",
+    { text: String(overridden) }, " overridden)",
+  ]);
+  if (s.config_status) addParts(hdr, ["config: ", { text: s.config_status }]);
+  const ev = s.evaluations_today != null ? s.evaluations_today : 0;
+  const wr = s.writes_today != null ? s.writes_today : 0;
+  const ov = s.overrides_today != null ? s.overrides_today : 0;
+  addParts(hdr, [
+    "today: ", { text: String(wr) }, " writes · ", { text: String(ev) }, " evals · ",
+    { text: String(ov) }, " overrides",
+  ]);
+  if (s.config_loaded_at) addParts(hdr, ["loaded " + fmtTime(s.config_loaded_at)]);
+}
+
+// A device's on/off arrives at the top level as `onState` over the REST API;
+// `onOffState` only exists inside `states`. A zone that is off is disabled.
+// The `states.onOffState` fallback covers a payload that omits `onState` (a
+// device still starting); it deliberately never overrides a present `onState`.
+function isOff(dev) {
+  if (dev.onState === false) return true;
+  const st = dev.states || {};
+  return dev.onState == null && st.onOffState === false;
+}
+
+function buildCard(dev) {
+  const hasStates = !!(dev.states && Object.keys(dev.states).length);
+  const s = dev.states || {};
+  const card = document.createElement("div");
+  card.className = "card" + (isOff(dev) ? " disabled" : "");
+  card.dataset.id = dev.id;
+
+  const crow = document.createElement("div");
+  crow.className = "crow";
+  const nameEl = document.createElement("div");
+  nameEl.className = "zname";
+  nameEl.textContent = zoneName(dev);
+  const chipInfo = hasStates ? stateChip(dev, s) : { cls: "unknown", label: "UNKNOWN" };
+  const chipEl = document.createElement("span");
+  chipEl.className = "chip " + chipInfo.cls;
+  chipEl.textContent = chipInfo.label;
+  crow.appendChild(nameEl);
+  crow.appendChild(chipEl);
+  card.appendChild(crow);
+
+  if (!hasStates) {
+    // A zone device that hasn't finished starting has no states at all yet --
+    // don't fabricate a period/lux/presence reading it never reported.
+    const notice = document.createElement("div");
+    notice.className = "explain";
+    notice.textContent = "no state reported (device not started?)";
+    card.appendChild(notice);
+    return card;
+  }
+
+  const facts = document.createElement("div");
+  facts.className = "facts";
+  const period = document.createElement("span");
+  period.textContent = s.period ? s.period : "no period";
+  const lux = document.createElement("span");
+  lux.textContent = luxFact(s);
+  const presence = document.createElement("span");
+  presence.textContent = presenceFact(s);
+  facts.appendChild(period); facts.appendChild(lux); facts.appendChild(presence);
+  card.appendChild(facts);
+
+  const explain = document.createElement("div");
+  explain.className = "explain";
+  explain.textContent = s.explain || "";
+  card.appendChild(explain);
+
+  const foot = document.createElement("div");
+  foot.className = "foot";
+
+  const { items: lightsArr, unparsedCount } = parseDesired(s.desired_summary);
+  const disc = document.createElement("button");
+  disc.className = "disclosure";
+  disc.type = "button";
+  const isOpen = openIds.has(String(dev.id));
+  disc.setAttribute("aria-expanded", isOpen ? "true" : "false");
+  disc.innerHTML = '<span class="tri">▸</span><span class="dlabel"></span>';
+  disc.querySelector(".dlabel").textContent =
+    lightsArr.length + (lightsArr.length === 1 ? " light" : " lights") +
+    (unparsedCount > 0 ? " · " + unparsedCount + " unparsed" : "");
+
+  const list = document.createElement("ul");
+  list.className = "lights";
+  list.hidden = !isOpen;
+  for (const l of lightsArr) {
+    const li = document.createElement("li");
+    const nm = document.createElement("span");
+    nm.textContent = lightName(l.id);
+    const lv = document.createElement("span");
+    lv.className = "lvl";
+    lv.textContent = levelLabel(l.level);
+    li.appendChild(nm); li.appendChild(lv);
+    list.appendChild(li);
+  }
+
+  disc.addEventListener("click", () => {
+    const nowOpen = list.hidden;
+    list.hidden = !nowOpen;
+    disc.setAttribute("aria-expanded", nowOpen ? "true" : "false");
+    const key = String(dev.id);
+    if (nowOpen) openIds.add(key); else openIds.delete(key);
+  });
+
+  foot.appendChild(disc);
+  foot.appendChild(list);
+
+  const counters = document.createElement("div");
+  counters.className = "counters";
+  const wr = s.writes_today != null ? s.writes_today : 0;
+  const ev = s.evaluations_today != null ? s.evaluations_today : 0;
+  const ov = s.overrides_today != null ? s.overrides_today : 0;
+  counters.textContent = `${wr} writes · ${ev} evals · ${ov} override${ov === 1 ? "" : "s"}`;
+  foot.appendChild(counters);
+
+  card.appendChild(foot);
+  return card;
+}
+
+// Called on every successful poll (see `onPollOk`), payload and all. The
+// non-array guard runs every time regardless of whether the payload changed
+// -- a persistently malformed response must keep saying so, not just once.
+// `lastRenderedJson` gates only the DOM rebuild below it.
+function render(all) {
+  if (!Array.isArray(all)) {
+    showErr("Unexpected response from Indigo (not a device list)");
+    lastRenderedJson = null;
+    return;
+  }
+
+  const json = JSON.stringify(all);
+  if (json === lastRenderedJson) return;
+  lastRenderedJson = json;
+
+  deviceNames = {};
+  for (const d of all) deviceNames[String(d.id)] = d.name || ("#" + d.id);
+
+  const zones = all.filter(d => d.pluginId === PLUGIN_ID && d.deviceTypeId === ZONE_TYPE);
+  const ctrl = all.find(d => d.pluginId === PLUGIN_ID && d.deviceTypeId === CTRL_TYPE) || null;
+
+  renderHeader(ctrl);
+
+  const grid = $("grid");
+  const empty = $("empty");
+  if (!zones.length) {
+    grid.textContent = "";
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+  zones.sort((a, b) => zoneName(a).localeCompare(zoneName(b)));
+
+  grid.textContent = "";
+  for (const z of zones) grid.appendChild(buildCard(z));
+}
+
+// Runs on every successful poll, changed or not, so the banner and the
+// timestamp reflect that the connection is alive even when nothing in the
+// device list moved (and `render`, called right after, may still redisplay
+// a content error over top of the just-cleared banner).
+function onPollOk() {
+  if (authFailed) return;
+  showErr("");
+  $("updated").textContent = "updated " + fmtClock(new Date());
+}
+
+async function init() {
+  if (typeof IndigoAPI === "undefined" || !IndigoAPI.isConfigured()) {
+    showErr("Not connected to Indigo. Open this page from the Indigo server or the dom.io app.");
+    return;
+  }
+  indigo = new IndigoAPI();
+  indigo.onError(e => {
+    if (authFailed) return;
+    lastRenderedJson = null; // so the next success is a full rebuild, not a no-op diff
+    showErr("Indigo error: " + e.message);
+  });
+  indigo.onAuthFailure(() => {
+    authFailed = true;
+    if (watcher) { watcher.stop(); watcher = null; }
+    showErr("Authentication failed — reload the page with a valid ?api-key=");
+  });
+  watcher = indigo.observeAll(render, 5000, onPollOk);
+}
+
+init();
+</script>
+</body>
+</html>
