@@ -10,7 +10,7 @@ import datetime as dt
 import json
 
 import pytest
-from helpers import FixedSun
+from helpers import FixedSun, make_period
 
 from lamplighter.config import (
     Config,
@@ -167,6 +167,10 @@ def test_a_file_path_and_a_dict_load_the_same_way(tmp_path):
     [
         ({"hold_seconds": 86401}, "zones/0/hold_seconds"),
         ({"hold_seconds": True}, "zones/0/hold_seconds"),
+        (
+            {"periods": [make_period("Evening", "18:00", "23:00", hold_seconds=86401)]},
+            "zones/0/periods/0/hold_seconds",
+        ),
         ({"presence_devices": []}, "zones/0/presence_devices"),
         ({"presence_devices": [0]}, "zones/0/presence_devices/0"),
         ({"lights": [201, 201]}, "zones/0/lights"),
