@@ -22,7 +22,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Strict xfail: a stub that starts passing is a FAILURE, not a quiet pass.
-# The acceptance suite is written as xfail stubs ahead of the engine (M0), so
-# this is what makes M1 land promise by promise instead of all at once.
+# The acceptance suite began as xfail stubs ahead of the engine (M0) and was
+# landed promise by promise; no stubs remain, but the setting stays so that
+# any future xfail that starts passing fails the run instead of being
+# silently absorbed.
 xfail_strict = true
 addopts = "-ra"
