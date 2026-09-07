@@ -1230,3 +1230,34 @@ def test_a_reload_that_moves_no_zone_still_republishes_it():
         "the rebuilt zone was evaluated but never republished; its device keeps "
         "the pre-evaluation snapshot the reload pushed"
     )
+
+
+def test_the_wake_cause_uses_the_period_hold():
+    """A wake at a period hold's expiry is named "presence hold expired", not
+    "midnight": the engine's wake-cause check must read the effective hold.
+
+    Kills: engine.Engine._wake_cause reading `zone.config.hold_seconds`
+    instead of `zone.hold_seconds(now)`.
+    """
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, _changed = build(
+        commander,
+        lights=[201],
+        hold_seconds=3600,
+        periods=[make_period("Evening", "18:00", "23:00", levels={"201": 60}, hold_seconds=900)],
+    )
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+    engine.device_updated(*presence(101, True, False), clock.at(seconds=10))
+    engine.tick(clock.at(seconds=10))
+
+    at_expiry = clock.at(seconds=910)
+    assert engine.next_wake(at_expiry) <= at_expiry, "precondition: the 900 s hold is due"
+    summary = engine.tick(at_expiry)
+    assert [t.cause for t in summary.transitions] == ["presence hold expired"], (
+        "the wake at the period hold's expiry was named by the zone-level hold"
+    )

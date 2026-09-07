@@ -524,7 +524,7 @@ class Engine:
         if readable:
             self.logger.debug(
                 f"{zone.name}: inputs seeded from the devices themselves -- presence "
-                f"{'active' if zone.presence.active(now, zone.config.hold_seconds) else 'inactive'}"
+                f"{'active' if zone.presence.active(now, zone.hold_seconds(now)) else 'inactive'}"
                 f" (last seen {zone.presence.last_seen or 'never'}), "
                 f"lux {zone.lux.value if zone.lux.value is not None else 'unread'}"
             )
@@ -583,7 +583,7 @@ class Engine:
         override = zone.override
         if override is not None and override.expires_at <= now:
             return "override expiry"
-        hold_expiry = zone.presence.expiry(zone.config.hold_seconds)
+        hold_expiry = zone.presence.expiry(zone.hold_seconds(now))
         if hold_expiry is not None and hold_expiry <= now:
             return "presence hold expired"
         period = zone.active_period(now)

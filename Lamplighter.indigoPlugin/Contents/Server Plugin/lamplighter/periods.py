@@ -222,6 +222,9 @@ class Period:
 
     ``override`` is a ``config.PeriodOverride`` or None, typed loosely here
     only to keep this module below the loader in the import order.
+
+    ``hold_seconds`` overrides the zone's presence hold while this period is
+    active (PRD section 5.4). None means the zone's value applies.
     """
 
     name: str
@@ -233,6 +236,7 @@ class Period:
     limit: int | None = None
     adjust_by_lux: bool = False
     override: Any = None
+    hold_seconds: int | None = None
 
 
 def period_window(period: Period, date: dt.date, sun: SunProvider):

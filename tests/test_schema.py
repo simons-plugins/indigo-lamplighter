@@ -137,6 +137,33 @@ def test_presence_variables_rejects_a_non_integer():
     assert errors, "a variable NAME is not a variable id"
 
 
+def test_period_hold_seconds_is_accepted_in_range():
+    """A period may carry its own presence hold, overriding the zone's
+    while it is active (the Dining Room's short daytime-walk-through hold).
+
+    Kills: a schema edit that forgot to add `hold_seconds` to a period's
+    `properties`, which would make this fail on `additionalProperties`
+    instead of validating.
+    """
+    doc = copy.deepcopy(EXAMPLE)
+    doc["zones"][0]["periods"][0]["hold_seconds"] = 900
+    assert _errors(doc) == []
+
+
+def test_period_hold_seconds_rejects_out_of_range():
+    """A period's `hold_seconds` shares the zone's 0..86400 range.
+
+    Kills: a `hold_seconds` schema on `period` that forgot the `minimum` or
+    `maximum` bound and so accepted anything.
+    """
+    doc = copy.deepcopy(EXAMPLE)
+    doc["zones"][0]["periods"][0]["hold_seconds"] = 86401
+    assert _errors(doc), "86401 is above the maximum of 86400"
+
+    doc["zones"][0]["periods"][0]["hold_seconds"] = -1
+    assert _errors(doc), "-1 is below the minimum of 0"
+
+
 # ------------------------------------------------------- invalid documents
 #
 # Each mutation returns the path the resulting error must carry. Errors are

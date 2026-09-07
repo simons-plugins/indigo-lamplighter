@@ -419,3 +419,258 @@ def test_explain_says_which_sensor_is_holding_the_room():
     zone.evaluate(at(hours=2), "sensor cleared")
     held = zone.explain(at(hours=2))
     assert "presence=active (hold, last seen 22:00:00)" in held, held
+
+
+# --------------------------------------------- a period's own hold_seconds
+#
+# The Dining Room is PIR-only and needs the full 3600 s hold for the seated
+# working day, so a person going quiet is not left in the dark -- but the
+# same 3600 s on an 8 s morning PIR trip lights the room for an hour with
+# nobody in it. A period may set its own hold_seconds to fix that without a
+# second zone.
+
+
+def _period_hold_zone(
+    period_hold, zone_hold=3600, name="Evening", start="18:00", end="23:00", **zone_fields
+):
+    """A one-light zone whose sole period carries `period_hold` (or none, if
+    `period_hold` is None), against a zone-level hold of `zone_hold`."""
+    extra = {} if period_hold is None else {"hold_seconds": period_hold}
+    period = make_period(name, start, end, levels={"201": 60}, **extra)
+    return make_zone(
+        [period],
+        logger=LOG,
+        lights=[201],
+        presence_devices=[101],
+        hold_seconds=zone_hold,
+        lux={"device": 302, "dark_below": 2200, "hysteresis": 300},
+        **zone_fields,
+    )
+
+
+def test_a_period_hold_overrides_the_zone_hold_while_active():
+    """The active period's hold_seconds wins over the zone's while it is
+    active (schema/PRD 5.4): a 900 s period hold empties the room 55 minutes
+    sooner than the zone's 3600 s.
+
+    Mutation applied: Zone._hold_for's
+    `if period is not None and period.hold_seconds is not None: return
+    period.hold_seconds` -> always `return self.config.hold_seconds`.
+    """
+    zone = _period_hold_zone(period_hold=900, zone_hold=3600)
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
+    assert zone.evaluate(NOW, "presence edge").to_state is ZoneState.OCCUPIED
+
+    assert zone.evaluate(at(seconds=899), "reconcile tick") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+    move = zone.evaluate(at(seconds=900), "period hold expired")
+    assert (move.from_state, move.to_state) == (ZoneState.OCCUPIED, ZoneState.VACANT)
+
+
+def test_a_period_without_hold_uses_the_zone_hold():
+    """A period that does not set hold_seconds defers to the zone's -- the
+    room still waits the full 3600 s.
+
+    Mutation applied: config._period's period hold default of `None` ->
+    `0`, which would zero every period's hold that does not set its own.
+    """
+    zone = _period_hold_zone(period_hold=None, zone_hold=3600)
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
+    assert zone.evaluate(NOW, "presence edge").to_state is ZoneState.OCCUPIED
+
+    assert zone.evaluate(at(seconds=901), "reconcile tick") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+    move = zone.evaluate(at(seconds=3601), "zone hold expired")
+    assert (move.from_state, move.to_state) == (ZoneState.OCCUPIED, ZoneState.VACANT)
+
+
+def test_next_wake_uses_the_period_hold():
+    """next_wake schedules the hold expiry the ACTIVE PERIOD names, not the
+    zone's -- otherwise the worker sleeps through the moment the room
+    actually empties.
+
+    Mutation applied: Zone.next_wake's
+    `hold_expiry = self.presence.expiry(self.hold_seconds(now))` ->
+    `self.presence.expiry(self.config.hold_seconds)`.
+    """
+    zone = _period_hold_zone(period_hold=900, zone_hold=3600)
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
+    zone.evaluate(NOW, "presence edge")
+
+    assert zone.next_wake(NOW) == at(seconds=900)
+
+
+def test_the_hold_of_the_period_active_now_is_the_one_judged():
+    """The hold judged is the one for the period active AT THE MOMENT of
+    judging, not the one active when presence was last seen -- so a hold
+    can lengthen or shorten at a period boundary (schema note on
+    period.hold_seconds).
+
+    A walk-through clears at 05:55 under Overnight's 900 s hold, which
+    would have expired by 06:10. But Day (06:00-, hold 3600 s) is the
+    period active when the zone is asked at 06:10, and its longer hold
+    keeps the room occupied until 06:55.
+
+    Mutation applied: Zone.evaluate reading the STALE `self._period` (the
+    last evaluated period) for the hold instead of the `period` just
+    resolved fresh against `now` -- i.e.
+    `self._hold_for(self._period)` in place of `self._hold_for(period)`.
+    """
+    base = dt.datetime(2026, 9, 4, 5, 55, 0)
+    zone = make_zone(
+        [
+            make_period("Overnight", "22:00", "06:00", levels={"201": 60}, hold_seconds=900),
+            make_period("Day", "06:00", "22:00", levels={"201": 60}, hold_seconds=3600),
+        ],
+        logger=LOG,
+        lights=[201],
+        presence_devices=[101],
+        hold_seconds=1800,  # the zone's own value -- deliberately not either period's
+        lux=None,
+    )
+    zone.ingest_presence(101, True, base)
+    zone.ingest_presence(101, False, base)
+    assert zone.evaluate(base, "presence edge").to_state is ZoneState.OCCUPIED
+
+    at_0610 = base + dt.timedelta(minutes=15)
+    assert zone.evaluate(at_0610, "still occupied under Day's hold") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+    at_0656 = base + dt.timedelta(minutes=61)
+    move = zone.evaluate(at_0656, "day hold expired")
+    assert (move.from_state, move.to_state) == (ZoneState.OCCUPIED, ZoneState.VACANT)
+
+
+def test_dry_run_uses_the_period_hold():
+    """dry_run judges presence against the active period's hold too -- the
+    report that exists to answer "what would this zone be doing" must not
+    lie about which hold governs it.
+
+    Mutation applied: Zone.dry_run's
+    `presence_active = self.presence.active(at, self._hold_for(period))` ->
+    `self.presence.active(at, self.config.hold_seconds)`.
+    """
+    zone = _period_hold_zone(period_hold=900, zone_hold=3600)
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
+    zone.evaluate(NOW, "presence edge")
+    assert zone.state is ZoneState.OCCUPIED
+
+    report = zone.dry_run(at(seconds=901))
+    assert report.state is ZoneState.VACANT
+
+    # A dry run must not have decided anything: the live zone is unmoved.
+    assert zone.state is ZoneState.OCCUPIED
+
+
+def test_a_period_hold_longer_than_the_zone_hold_keeps_the_room_occupied_past_the_zone_hold():
+    """A period hold LONGER than the zone's is honoured in full -- the PRD's
+    motivating case is a long seated-working-day hold on a period over a
+    short zone hold, and every other test here runs the short way round.
+
+    Mutation applied: Zone._hold_for returning
+    `min(period.hold_seconds, self.config.hold_seconds)`.
+    """
+    zone = _period_hold_zone(period_hold=3600, zone_hold=900)
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
+    assert zone.evaluate(NOW, "presence edge").to_state is ZoneState.OCCUPIED
+
+    assert zone.evaluate(at(seconds=901), "reconcile tick") is None, (
+        "the zone's 900 s hold was applied instead of the period's 3600 s"
+    )
+    assert zone.next_wake(NOW) == at(seconds=3600)
+    move = zone.evaluate(at(seconds=3600), "period hold expired")
+    assert (move.from_state, move.to_state) == (ZoneState.OCCUPIED, ZoneState.VACANT)
+
+
+def test_a_period_hold_of_zero_empties_the_room_the_instant_the_sensor_clears():
+    """`hold_seconds: 0` on a period means "follow the sensors exactly", as it
+    does on the zone -- it must not fall through to the zone's hold.
+
+    Mutation applied: Zone._hold_for's `period.hold_seconds is not None` ->
+    `period.hold_seconds` (truthiness), which reads a 0 as "unset".
+    """
+    zone = _period_hold_zone(period_hold=0, zone_hold=3600)
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    assert zone.evaluate(NOW, "presence edge").to_state is ZoneState.OCCUPIED
+
+    zone.ingest_presence(101, False, at(seconds=10))
+    move = zone.evaluate(at(seconds=10), "presence cleared")
+    assert move is not None and move.to_state is ZoneState.VACANT, (
+        "a period hold of 0 was read as unset and the zone's 3600 s applied"
+    )
+
+
+def test_unlock_on_leave_judges_the_empty_room_by_the_period_hold():
+    """An override taken in a room whose PERIOD hold has already run out is
+    not released on the next evaluation (R10: the release is edge-shaped --
+    a hold that began after the override must expire). With the zone's
+    longer hold the room would still count as "just left" and the override
+    would evaporate.
+
+    Mutation applied: Zone._released_by_leaving's
+    `self.presence.expiry(self.hold_seconds(now))` ->
+    `self.presence.expiry(self.config.hold_seconds)`.
+    """
+    zone = _period_hold_zone(
+        period_hold=900,
+        zone_hold=3600,
+        override={"enabled": True, "duration_minutes": 60, "extend_minutes": 0,
+                  "unlock_on_leave": True, "exclude": []},
+    )
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
+    assert zone.evaluate(NOW, "presence edge").to_state is ZoneState.OCCUPIED
+    assert zone.evaluate(at(seconds=900), "period hold expired").to_state is ZoneState.VACANT
+
+    zone.start_override(201, at(seconds=1000))
+    assert zone.evaluate(at(seconds=1000), "override").to_state is ZoneState.OVERRIDDEN
+
+    assert zone.evaluate(at(seconds=1100), "reconcile tick") is None, (
+        "the override evaporated: the zone's 3600 s hold made the room look "
+        "freshly left when the period's 900 s had already run out"
+    )
+    assert zone.dry_run(at(seconds=1100)).state is ZoneState.OVERRIDDEN
+
+
+def test_unlock_on_leave_fires_at_the_period_hold_expiry():
+    """An override taken while the room is occupied under a LONG period hold
+    is released when THAT hold runs out after the person leaves -- not never
+    (the zone's shorter hold had expired before the override was taken, so
+    judging by it there is no hold-that-began-after-the-override at all).
+
+    Mutation applied: as above, `_released_by_leaving` on the zone hold.
+    """
+    zone = _period_hold_zone(
+        period_hold=3600,
+        zone_hold=900,
+        override={"enabled": True, "duration_minutes": 120, "extend_minutes": 0,
+                  "unlock_on_leave": True, "exclude": []},
+    )
+    zone.ingest_lux(1800, NOW)
+    zone.ingest_presence(101, True, NOW)
+    zone.ingest_presence(101, False, NOW)
+    assert zone.evaluate(NOW, "presence edge").to_state is ZoneState.OCCUPIED
+
+    zone.start_override(201, at(seconds=1000))
+    assert zone.evaluate(at(seconds=1000), "override").to_state is ZoneState.OVERRIDDEN
+    assert zone.evaluate(at(seconds=3000), "reconcile tick") is None
+
+    move = zone.evaluate(at(seconds=3600), "presence hold expired")
+    assert move is not None and (move.from_state, move.to_state) == (
+        ZoneState.OVERRIDDEN, ZoneState.VACANT
+    ), "the override was never released on leave under the period hold"
+    assert zone.override is None

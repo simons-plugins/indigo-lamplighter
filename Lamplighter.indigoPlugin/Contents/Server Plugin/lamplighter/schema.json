@@ -199,6 +199,12 @@
           "$ref": "#/$defs/period_override",
           "description": "Optional override timing that replaces the zone's while this period is active. Absent, the zone's 'override' values apply."
         },
+        "hold_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "description": "Presence hold for THIS period, overriding the zone's hold_seconds while it is active: how long after the last presence input clears the room stays occupied. Absent means the zone's value. Lets a PIR-only room keep a long hold for the seated working day and a short one for a night-time walk-through. The hold applied at any moment is the one for the period active AT THAT MOMENT, not the one active when presence was last seen, so a hold can lengthen or shorten at a period boundary: presence cleared just before a boundary is judged, from the boundary onward, against the new period's hold."
+        },
         "levels": {
           "type": "object",
           "minProperties": 1,

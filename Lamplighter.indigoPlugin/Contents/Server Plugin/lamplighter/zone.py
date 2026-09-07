@@ -304,6 +304,28 @@ class Zone:
         """The period covering ``now``, or None -- a gap is a real answer."""
         return periods_module.active_period(self.config.periods, now, self.sun)
 
+    def _hold_for(self, period) -> int:
+        """The presence hold in force for ``period``, or the zone's if unset.
+
+        ``period`` may be None (no period covers the moment) or a period
+        whose ``hold_seconds`` was left absent -- both fall back to the
+        zone's ``hold_seconds``. Takes the period rather than a moment so
+        that callers which have already resolved it (``evaluate``,
+        ``dry_run``) do not resolve it a second time.
+        """
+        if period is not None and period.hold_seconds is not None:
+            return period.hold_seconds
+        return self.config.hold_seconds
+
+    def hold_seconds(self, now: dt.datetime) -> int:
+        """The presence hold in force at ``now``: the active period's if it
+        sets one, else the zone's (PRD section 5.4). The hold judged is
+        always the one for the period active AT ``now``, not the one active
+        when presence was last seen, so it can lengthen or shorten at a
+        period boundary.
+        """
+        return self._hold_for(self.active_period(now))
+
     def dark_below(self) -> float:
         """The dark threshold: the Indigo variable if there is one, else the file.
 
@@ -513,7 +535,7 @@ class Zone:
         """
         if not self.config.override.unlock_on_leave or presence_active:
             return False
-        expiry = self.presence.expiry(self.config.hold_seconds)
+        expiry = self.presence.expiry(self.hold_seconds(now))
         return expiry is not None and expiry > self.override.since
 
     def override_holds_at(self, at: dt.datetime, presence_active: bool) -> bool:
@@ -549,7 +571,7 @@ class Zone:
         self.last_trigger = cause
 
         period = self.active_period(now)
-        presence_active = self.presence.active(now, self.config.hold_seconds)
+        presence_active = self.presence.active(now, self._hold_for(period))
         dark = self.is_dark()
 
         # The override's own clock runs before the state is chosen, so that an
@@ -785,7 +807,7 @@ class Zone:
         # point: there is no hold to expire until the room clears. Scheduling
         # one anyway is how a zone on a level sensor wakes up in the middle
         # of somebody sitting still and puts itself VACANT.
-        hold_expiry = self.presence.expiry(self.config.hold_seconds)
+        hold_expiry = self.presence.expiry(self.hold_seconds(now))
         if hold_expiry is not None:
             candidates.append(hold_expiry)
         if self.override is not None:
@@ -885,7 +907,7 @@ class Zone:
         answer -- the one failure a dry run must not have.
         """
         period = self.active_period(at)
-        presence_active = self.presence.active(at, self.config.hold_seconds)
+        presence_active = self.presence.active(at, self._hold_for(period))
         dark = self.would_be_dark()
         overridden = self.override_holds_at(at, presence_active)
         off_duty = self._off_duty_reason(period, dark)
