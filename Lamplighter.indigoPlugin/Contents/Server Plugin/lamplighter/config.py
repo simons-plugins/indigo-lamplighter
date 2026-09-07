@@ -75,7 +75,13 @@ _ZONE_OVERRIDE_KEYS = (
     "exclude",
 )
 _PERIOD_REQUIRED = ("name", "from", "to", "mode", "levels")
-_PERIOD_KEYS = _PERIOD_REQUIRED + ("vacant_levels", "limit", "adjust_by_lux", "override")
+_PERIOD_KEYS = _PERIOD_REQUIRED + (
+    "vacant_levels",
+    "limit",
+    "adjust_by_lux",
+    "override",
+    "hold_seconds",
+)
 _PERIOD_OVERRIDE_KEYS = ("duration_minutes", "extend_minutes")
 _MODES = ("on_and_off", "off_only")
 _WHEN_UNREADABLE = ("dark", "bright")
@@ -411,6 +417,11 @@ def _period(raw, path, lights, has_lux):
         adjust_by_lux=_adjust_by_lux(raw, f"{path}/adjust_by_lux", has_lux),
         override=(
             None if "override" not in raw else _period_override(raw["override"], f"{path}/override")
+        ),
+        hold_seconds=(
+            None
+            if "hold_seconds" not in raw
+            else _int(raw["hold_seconds"], f"{path}/hold_seconds", minimum=0, maximum=86400)
         ),
     )
 

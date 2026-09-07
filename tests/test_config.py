@@ -138,6 +138,21 @@ def test_a_period_override_is_a_replacement_block():
     assert zone.periods[0].override == PeriodOverride(duration_minutes=120, extend_minutes=30)
 
 
+def test_a_period_hold_seconds_loads_and_defaults_to_none():
+    """A period's `hold_seconds` loads as an int when given, and defaults to
+    None -- meaning "the zone's value applies" -- when absent.
+
+    Kills: a loader that defaults the period hold to 0 instead of None,
+    which would silently zero the zone's hold for every period that does
+    not set its own.
+    """
+    document = doc()
+    assert load_config(document, SUN, TODAY).zones[0].periods[0].hold_seconds is None
+
+    document["zones"][0]["periods"][0]["hold_seconds"] = 900
+    assert load_config(document, SUN, TODAY).zones[0].periods[0].hold_seconds == 900
+
+
 def test_a_file_path_and_a_dict_load_the_same_way(tmp_path):
     path = tmp_path / "lamplighter.json"
     path.write_text(json.dumps(doc()))
