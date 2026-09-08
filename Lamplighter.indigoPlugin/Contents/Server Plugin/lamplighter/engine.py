@@ -446,8 +446,9 @@ class Engine:
         seen *now* -- an occupied room at startup is occupied now, and the
         hold should run from now rather than from a timestamp nobody has -- 
         and the lux sensor is read so the first verdict comes from a reading
-        instead of a default. A device reporting off changes nothing:
-        presence ends by the hold expiring, never by a sensor going quiet.
+        instead of a default. A device reporting off does not touch
+        presence -- presence ends by the hold expiring, never by a sensor
+        going quiet -- but its reading is remembered for the status page.
 
         Returns the zones that still could not be read, which stay unseeded
         and are retried on the next tick.

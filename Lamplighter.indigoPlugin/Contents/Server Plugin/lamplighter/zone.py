@@ -162,6 +162,9 @@ class Zone:
         #: reload by :func:`persist.rebuild_zone`.
         self.clock = clock
         #: (date, json) memo for _periods_today_json; None until first asked.
+        #: Never written on a date the sun fell back to its fixed time --
+        #: see _periods_today_json -- so a recovered server is re-asked on
+        #: the next snapshot instead of the memo riding out the fallback.
         self._periods_today_cache = None
         self.logger = logger or logging.getLogger("Plugin")
 
@@ -1027,14 +1030,27 @@ class Zone:
         to be told about rather than shown as "no periods configured", which
         is what an empty ``[]`` would otherwise look exactly like (R15) --
         so a failure here publishes the literal string ``"unavailable"``,
-        warned once, distinct from the real empty-periods answer.
+        warned once until it succeeds again (module-level key; a config
+        reload does not reset it).
+
+        In production this except clause is not the whole story:
+        ``periods.IndigoSun`` never lets a server failure reach here at all --
+        it swallows the exception itself and returns a fixed fallback time
+        instead of raising (PRD section 9), which would otherwise make every
+        evaluation look like it resolved real sun times when it did not. So
+        every entry carries ``"approximate": true`` on a day the sun fell
+        back to that fixed time, and the day is left out of the memo below --
+        see the comment there.
         """
         key = ("periods-today", self.name)
         today = now.date()
         # Memoised per date: the answer only moves at midnight or on a config
         # reload (which builds a fresh Zone), and snapshot() runs on every
         # evaluation, so without this each publish would re-ask the server
-        # for the sun once per sun-relative boundary.
+        # for the sun once per sun-relative boundary. A day the sun fell back
+        # on is never written here (see below), so a server that recovers
+        # mid-day is re-asked on the very next snapshot instead of riding out
+        # a cached "approximate" answer until midnight.
         cached = self._periods_today_cache
         if cached is not None and cached[0] == today:
             return cached[1]
@@ -1054,16 +1070,34 @@ class Zone:
                     entry["limit"] = period.limit
                 entries.append(entry)
         except Exception as exc:  # the sun call is the one thing here that can fail
-            compare.warn_once(
+            if compare.warn_once(
                 self.logger,
                 key,
                 f"{self.name}: could not resolve today's periods for the status "
                 f"page ({type(exc).__name__}: {exc}); publishing periods_today as "
                 "'unavailable' rather than an empty list, which would look like a "
                 "zone with no periods configured.",
-            )
+            ):
+                # First occurrence only: a real traceback, not just the
+                # exception's type and message, because a sun provider
+                # raising at all is a programming error (IndigoSun itself
+                # never does -- see the docstring above), and a single
+                # trace-less line is not enough to debug one.
+                self.logger.warning("traceback follows", exc_info=True)
             return "unavailable"
         compare.reset_warnings(key)
+
+        # Any boundary in `entries` may be running on the fallback -- a
+        # sunset-relative period and a clock-only one in the same zone would
+        # otherwise need entry-by-entry tracking of which edges actually used
+        # the sun, for no benefit anyone has asked for -- so every entry is
+        # marked, not just the ones this zone happens to think depend on it.
+        fell_back_on = getattr(self.sun, "fell_back_on", None)
+        if fell_back_on is not None and fell_back_on(today):
+            for entry in entries:
+                entry["approximate"] = True
+            return json.dumps(entries)
+
         text = json.dumps(entries)
         self._periods_today_cache = (today, text)
         return text
@@ -1072,13 +1106,16 @@ class Zone:
         """Every presence device and variable configured here, as JSON.
 
         ``on`` is the last reading :meth:`ingest_presence` actually recorded
-        for that input (see ``Presence.last_value``), ``None`` if it has
-        never been ingested -- seeding only ingests an input reporting ON
-        (Engine._seed_zone), so a currently-off one can genuinely have
-        nothing recorded yet, and that is an honest answer rather than a
-        guess. ``last`` marks whichever input's edge most recently moved the
-        zone (``Presence.last_input_id``), so the status page can point at
-        "the one that mattered" without re-parsing ``last_trigger``'s prose.
+        for that input (see ``Presence.last_value``). ``None`` means it has
+        never been recorded at all -- not seeded yet, or gone / a lookup that
+        failed at seeding time, both of which ``Engine._seed_zone`` skips
+        rather than guessing at -- and that is a degradation signal, not an
+        "off": an input that merely reported off *is* recorded, as False, by
+        the very same seeding path (see its own comments on why an off
+        reading is remembered without being ingested). ``last`` marks
+        whichever input's edge most recently moved the zone
+        (``Presence.last_input_id``), so the status page can point at "the
+        one that mattered" without re-parsing ``last_trigger``'s prose.
         """
         entries = []
         for dev_id in self.config.presence_devices:
@@ -1118,7 +1155,9 @@ def _variable_label(var_id) -> str:
 
     Same fallback rule as :func:`_device_label`: a label only, so a lookup
     that will not answer falls back to the id rather than taking the line
-    down.
+    down. Also what :meth:`_presence_inputs_json` publishes as that input's
+    ``name`` -- the page strips the "variable " prefix back off before
+    displaying it.
     """
     try:
         name = getattr(devices.get_variable(var_id), "name", "")

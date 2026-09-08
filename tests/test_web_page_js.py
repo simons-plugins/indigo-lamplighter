@@ -263,6 +263,71 @@ def test_verdictfor_names_the_since_and_until_clock_times(tmp_path):
     )
 
 
+# ---------------------------------------------------- actualState (table-driven)
+
+_ACTUAL_STATE_CASES = [
+    ("no_device_at_all", None, {"kind": "unknown"}),
+    ("device_with_no_states_at_all", {}, {"kind": "unknown"}),
+    ("device_with_onstate_explicitly_null", {"onState": None}, {"kind": "unknown"}),
+    (
+        # `states.onOffState` alone keeps this out of the "unknown" branch
+        # (the guard's second half is false), but `isOff`/`on` still read
+        # only `onState` for a relay's "on" -- unaffected by this change.
+        "onoffstate_present_but_not_onstate_reads_relay_off",
+        {"onState": None, "states": {"onOffState": True}},
+        {"kind": "relay", "on": False},
+    ),
+    ("relay_off", {"onState": False}, {"kind": "relay", "on": False}),
+    ("relay_on", {"onState": True}, {"kind": "relay", "on": True}),
+    (
+        "dimmer_off_reads_zero_brightness",
+        {"onState": False, "brightness": 40},
+        {"kind": "dimmer", "on": False, "brightness": 0},
+    ),
+    (
+        "dimmer_on_reads_its_brightness",
+        {"onState": True, "brightness": 40},
+        {"kind": "dimmer", "on": True, "brightness": 40},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "name,dev,expected", _ACTUAL_STATE_CASES, ids=[c[0] for c in _ACTUAL_STATE_CASES]
+)
+def test_actualstate_table(tmp_path, name, dev, expected):
+    """A device with no on/off reading anywhere (`onState` absent/null AND no
+    `states.onOffState`) must read as unknown, not guessed at as "off" --
+    the whole point being that an unresolved light must never render, or
+    compare, as though it were dark."""
+    driver = f"""
+        console.log(JSON.stringify({{
+            state: actualState({json.dumps(dev)}),
+        }}));
+    """
+    output = _run_page_logic(tmp_path, driver, name=f"actualstate_{name}.js")
+    assert output["state"] == expected
+
+
+@pytest.mark.parametrize("desired", ["on", "off"])
+def test_actualstate_unknown_never_mismatches_either_desired_polarity(tmp_path, desired):
+    """Kills: a stateless device reading as "off" by default, which would
+    flag a mismatch against a desired "on" light that was never actually
+    resolved -- a false red dot on a light this card cannot see at all."""
+    for index, dev in enumerate(({}, {"onState": None})):
+        driver = f"""
+            console.log(JSON.stringify({{
+                mismatch: mismatch({json.dumps(desired)}, {json.dumps(dev)}),
+                label: actualLabel({json.dumps(dev)}),
+            }}));
+        """
+        output = _run_page_logic(
+            tmp_path, driver, name=f"actualstate_unknown_{desired}_{index}.js"
+        )
+        assert output["mismatch"] is False
+        assert output["label"] == "unknown"
+
+
 # ------------------------------------------------------- mismatch (table-driven)
 
 _MISMATCH_CASES = [
@@ -429,3 +494,269 @@ def test_builddaystrip_renders_a_note_for_malformed_period_data(tmp_path):
     output = _run_page_logic(tmp_path, driver, name="builddaystrip_malformed.js")
     assert output["className"] == "strip-note"
     assert output["text"] == "period data unreadable"
+
+
+# --------------------------------------------- validPeriodEntry / splitValidPeriods
+
+_VALID_PERIOD_ENTRY_CASES = [
+    ("a_well_formed_entry", {"name": "Dusk", "from": "18:00", "to": "23:00"}, True),
+    ("single_digit_hour_is_accepted", {"name": "Dusk", "from": "6:00", "to": "9:05"}, True),
+    ("name_not_a_string", {"name": 5, "from": "18:00", "to": "23:00"}, False),
+    ("from_not_hhmm", {"name": "Dusk", "from": "sunset-30m", "to": "23:00"}, False),
+    ("to_not_a_string", {"name": "Dusk", "from": "18:00", "to": 2300}, False),
+    ("not_an_object_at_all", "Dusk", False),
+    ("null_entry", None, False),
+]
+
+
+@pytest.mark.parametrize(
+    "name,entry,expected", _VALID_PERIOD_ENTRY_CASES, ids=[c[0] for c in _VALID_PERIOD_ENTRY_CASES]
+)
+def test_validperiodentry_table(tmp_path, name, entry, expected):
+    driver = f"""
+        console.log(JSON.stringify({{
+            valid: validPeriodEntry({json.dumps(entry)}),
+        }}));
+    """
+    output = _run_page_logic(tmp_path, driver, name=f"validperiodentry_{name}.js")
+    assert output["valid"] is expected
+
+
+def test_splitvalidperiods_keeps_good_entries_in_order_and_counts_the_rest(tmp_path):
+    """Kills: dropping a good entry along with the bad ones, or counting a
+    good entry as invalid (or vice versa)."""
+    driver = """
+        const periods = [
+            { name: "Overnight", from: "00:00", to: "06:00" },
+            { name: "Broken", from: "sunset-30m", to: "19:00" },
+            { name: "Dusk", from: "18:00", to: "23:00" },
+            "not even an object",
+        ];
+        console.log(JSON.stringify(splitValidPeriods(periods)));
+    """
+    output = _run_page_logic(tmp_path, driver, name="splitvalidperiods.js")
+    assert [p["name"] for p in output["valid"]] == ["Overnight", "Dusk"]
+    assert output["invalidCount"] == 2
+
+
+# -------------------------------------------------------------- stripNoteFor
+
+def test_stripnotefor_is_empty_when_nothing_is_degraded(tmp_path):
+    driver = """
+        console.log(JSON.stringify({
+            note: stripNoteFor([{ name: "Dusk", from: "18:00", to: "23:00" }], 0),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="stripnotefor_clean.js")
+    assert output["note"] == ""
+
+
+def test_stripnotefor_names_an_approximate_entry(tmp_path):
+    driver = """
+        console.log(JSON.stringify({
+            note: stripNoteFor(
+                [{ name: "Dusk", from: "17:30", to: "23:00", approximate: true }], 0
+            ),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="stripnotefor_approximate.js")
+    assert output["note"] == "sun times unavailable — periods drawn at the fixed fallback"
+
+
+def test_stripnotefor_names_unreadable_entries_singular_and_plural(tmp_path):
+    driver = """
+        console.log(JSON.stringify({
+            one: stripNoteFor([], 1),
+            two: stripNoteFor([], 2),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="stripnotefor_counts.js")
+    assert output["one"] == "1 period entry unreadable"
+    assert output["two"] == "2 period entries unreadable"
+
+
+def test_stripnotefor_joins_both_degradations_when_both_apply(tmp_path):
+    """Kills: only ever reporting one of the two reasons, silently dropping
+    whichever ran second."""
+    driver = """
+        console.log(JSON.stringify({
+            note: stripNoteFor(
+                [{ name: "Dusk", from: "17:30", to: "23:00", approximate: true }], 3
+            ),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="stripnotefor_both.js")
+    assert output["note"] == (
+        "sun times unavailable — periods drawn at the fixed fallback · "
+        "3 period entries unreadable"
+    )
+
+
+# --------------------------------- buildDayStrip: approximate bands, mixed validity
+
+_FAKE_DOM_STUB = """
+function makeEl() {
+    return {
+        className: "", style: {}, textContent: "", title: "",
+        children: [],
+        appendChild(child) { this.children.push(child); },
+    };
+}
+document.createElement = () => makeEl();
+"""
+
+
+def test_builddaystrip_marks_an_approximate_entry_and_adds_the_strip_note(tmp_path):
+    """The band for an `approximate: true` entry carries the `approximate`
+    class and a title suffix, and the strip itself carries the sun-fallback
+    note under the ticks (A3). Kills: rendering an approximate entry
+    identically to a real one, or dropping the note."""
+    driver = (
+        _FAKE_DOM_STUB
+        + """
+        const s = {
+            period: "Dusk",
+            periods_today: JSON.stringify([
+                { name: "Dusk", from: "17:30", to: "23:00", mode: "on_and_off", approximate: true },
+            ]),
+        };
+        const wrap = buildDayStrip(s);
+        const strip = wrap.children[0];
+        const band = strip.children[0];
+        const note = wrap.children[wrap.children.length - 1];
+        console.log(JSON.stringify({
+            bandClassName: band.className,
+            bandTitle: band.title,
+            noteClassName: note.className,
+            noteText: note.textContent,
+        }));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="builddaystrip_approximate.js")
+    assert "approximate" in output["bandClassName"].split(" ")
+    assert output["bandTitle"].endswith(
+        "approximate: sun unavailable, drawn at the fixed fallback"
+    )
+    assert output["noteClassName"] == "strip-note"
+    assert output["noteText"] == "sun times unavailable — periods drawn at the fixed fallback"
+
+
+def test_builddaystrip_drops_only_the_unreadable_entries_and_notes_the_count(tmp_path):
+    """One good period and one malformed one in the same payload: the good
+    one is still drawn, the bad one is counted in the strip note rather than
+    silently vanishing or taking the whole strip down."""
+    driver = (
+        _FAKE_DOM_STUB
+        + """
+        const s = {
+            period: "Dusk",
+            periods_today: JSON.stringify([
+                { name: "Dusk", from: "18:00", to: "23:00", mode: "on_and_off" },
+                { name: "Broken", from: "sunset-30m", to: "19:00", mode: "on_and_off" },
+            ]),
+        };
+        const wrap = buildDayStrip(s);
+        const strip = wrap.children[0];
+        const note = wrap.children[wrap.children.length - 1];
+        console.log(JSON.stringify({
+            bandCount: strip.children.filter(c => (c.className || "").includes("band")).length,
+            noteText: note.textContent,
+        }));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="builddaystrip_mixed_validity.js")
+    assert output["bandCount"] == 1
+    assert output["noteText"] == "1 period entry unreadable"
+
+
+# ---------------------------------------------------- parsePresenceInputs (table-driven)
+
+def test_parsepresenceinputs_null_is_absent_not_malformed(tmp_path):
+    """`presence_inputs == null` means an older plugin never published the
+    state at all -- the section is simply not there, not a read failure.
+    Kills: treating a missing key the same as a garbled one."""
+    driver = """
+        console.log(JSON.stringify({
+            result: parsePresenceInputs(null),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="ppi_absent.js")
+    assert output["result"] == {"inputs": [], "malformed": False, "absent": True}
+
+
+def test_parsepresenceinputs_garbage_is_malformed_not_absent_or_empty(tmp_path):
+    """A present-but-unparseable string is a real degradation, distinct from
+    both `absent` (never published) and a genuine "[]" (no inputs
+    configured). Kills: falling back to an empty array on a parse failure,
+    which reads exactly like "this zone has no presence inputs"."""
+    driver = """
+        console.log(JSON.stringify({
+            result: parsePresenceInputs("{not json"),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="ppi_malformed.js")
+    assert output["result"] == {"inputs": [], "malformed": True, "absent": False}
+
+
+def test_parsepresenceinputs_a_valid_array_parses_through(tmp_path):
+    driver = """
+        console.log(JSON.stringify({
+            result: parsePresenceInputs(JSON.stringify([{ id: 1, kind: "device", on: true, last: true }])),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="ppi_valid.js")
+    assert output["result"] == {
+        "inputs": [{"id": 1, "kind": "device", "on": True, "last": True}],
+        "malformed": False,
+        "absent": False,
+    }
+
+
+def test_buildpresencechips_returns_null_for_an_absent_state(tmp_path):
+    """Kills: rendering an (empty) presence-inputs section even though the
+    plugin never published the state at all."""
+    driver = """
+        console.log(JSON.stringify({
+            result: buildPresenceChips({ presence_inputs: null }),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="bpc_absent.js")
+    assert output["result"] is None
+
+
+def test_buildpresencechips_renders_a_note_for_malformed_presence_inputs(tmp_path):
+    driver = """
+        document.createElement = () => ({ className: "", textContent: "" });
+        const el = buildPresenceChips({ presence_inputs: "{not json" });
+        console.log(JSON.stringify({
+            className: el.className,
+            text: el.textContent,
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="bpc_malformed.js")
+    assert output["className"] == "strip-note"
+    assert output["text"] == "presence inputs unreadable"
+
+
+# --------------------------------------------- buildLightsSection: unknownCount
+
+def test_buildlightssection_counts_unresolved_lights_separately_from_mismatches(tmp_path):
+    """A light this card could not resolve at all (`actualState` "unknown")
+    must be counted as `unknownCount`, not silently folded into 0
+    mismatches -- an all-unknown zone would otherwise report "0 off target"
+    and look clean. Kills: `unknownCount` always 0, or counting an unknown
+    light as a mismatch instead."""
+    driver = (
+        _FAKE_DOM_STUB
+        + """
+        deviceById = { "1": {}, "2": { onState: true } };
+        deviceNames = {};
+        const { mismatchCount, unknownCount } = buildLightsSection({
+            desired_summary: "1=60, 2=on",
+        });
+        console.log(JSON.stringify({ mismatchCount, unknownCount }));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="buildlightssection_unknown.js")
+    assert output["unknownCount"] == 1
+    assert output["mismatchCount"] == 0

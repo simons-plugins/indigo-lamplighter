@@ -64,7 +64,7 @@ ZONE_STATE_KEYS = (
     "writes_today",
     "overrides_today",
     "last_trigger",
-    # v2026.4.0 (status page redesign): the states the fork's card used to
+    # v2026.4.0 (status page redesign): the states the 2026.3.0 card used to
     # scrape out of `explain`'s prose instead of reading directly.
     "off_duty_cause",
     "periods_today",
@@ -177,6 +177,12 @@ def _zone_state(key, value) -> dict:
         if text == "unavailable":
             return {"key": key, "value": text, "uiValue": "unavailable"}
         count = _json_list_length(text)
+        # A JSON value that will not parse is not "0 periods" -- that reads
+        # exactly like a zone with nothing configured (R15). `uiValue` says
+        # so directly; `value` still carries the raw text so a caller that
+        # parses it themselves is not denied the chance to.
+        if count is None:
+            return {"key": key, "value": text, "uiValue": "unreadable"}
         return {"key": key, "value": text, "uiValue": f"{count} {noun}{'' if count == 1 else 's'}"}
 
     text = str(value or "")
@@ -325,14 +331,18 @@ def _as_float(value):
         return None
 
 
-def _json_list_length(text) -> int:
-    """The length of a JSON array published as a state, or 0 if it will not
-    parse -- a uiValue must never raise over a value only meant for display."""
+def _json_list_length(text):
+    """The length of a JSON array published as a state, or None if it will
+    not parse into one -- never 0, which reads as a real, empty answer and
+    is indistinguishable from a zone that genuinely has nothing configured
+    (R15). A uiValue must never raise over a value only meant for display,
+    so this itself still cannot raise; the caller turns None into the
+    'unreadable' uiValue."""
     try:
         parsed = json.loads(text)
     except (TypeError, ValueError):
-        return 0
-    return len(parsed) if isinstance(parsed, list) else 0
+        return None
+    return len(parsed) if isinstance(parsed, list) else None
 
 
 def _clock(iso_timestamp) -> str:

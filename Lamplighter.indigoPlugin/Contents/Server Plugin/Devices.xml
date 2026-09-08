@@ -104,7 +104,7 @@
                 <ControlPageLabel>Last Trigger</ControlPageLabel>
             </State>
 
-            <!-- v2026.4.0 (status page redesign): states the fork's card used
+            <!-- v2026.4.0 (status page redesign): states the 2026.3.0 card used
                  to scrape out of `explain`'s prose instead of reading directly. -->
             <State id="off_duty_cause">
                 <ValueType>String</ValueType>

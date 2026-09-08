@@ -263,6 +263,21 @@ def test_a_zone_with_no_override_says_none_rather_than_zero():
     assert states["override_device"]["uiValue"] == "none"
 
 
+@pytest.mark.parametrize("key", ["periods_today", "presence_inputs"])
+def test_unparseable_json_publishes_unreadable_not_a_quiet_zero_count(key):
+    """Garbled `periods_today`/`presence_inputs` text must not read as "0
+    periods"/"0 inputs" -- that is indistinguishable from a zone that
+    genuinely has none configured (R15). `value` still carries the raw text
+    unchanged, so a caller parsing it directly is not denied the chance.
+
+    Kills: `_json_list_length` returning 0 instead of None for text that
+    will not parse, which `_zone_state` would then format as a real count.
+    """
+    state = indigo_sync._zone_state(key, "{not json")
+    assert state["uiValue"] == "unreadable"
+    assert state["value"] == "{not json"
+
+
 def test_a_missing_snapshot_key_publishes_nothing_rather_than_raising():
     """A snapshot short of a key still publishes the rest.
 

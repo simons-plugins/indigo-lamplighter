@@ -74,6 +74,9 @@ border-left:1px solid var(--card-bg);border-right:1px solid var(--card-bg)}
 .band.off_only{background:repeating-linear-gradient(45deg,var(--band-off) 0,var(--band-off) 3px,
 transparent 3px,transparent 7px);opacity:.55}
 .band.active{border:2px solid var(--accent);border-radius:3px}
+/* The sun fell back to a fixed time for this entry: the band is a real
+   period at an unreal time, so it reads as drawn rather than measured. */
+.band.approximate{outline:2px dashed var(--warn);outline-offset:-2px;opacity:.7}
 /* A pill behind the name keeps it legible over the off_only hatching and
    where the now-line crosses a band. */
 .band .blabel{background:var(--card-bg);color:var(--text);padding:1px 7px;border-radius:999px;
@@ -88,6 +91,7 @@ margin-top:3px;font-variant-numeric:tabular-nums}
 color:var(--text-secondary);display:flex;justify-content:space-between;align-items:baseline;
 margin-bottom:6px}
 .section-label .off-target{color:var(--bad);font-weight:700;text-transform:none;letter-spacing:0}
+.section-label .off-unknown{color:var(--warn);font-weight:700;text-transform:none;letter-spacing:0;margin-left:8px}
 .lights{list-style:none;margin:0 0 12px;padding:0;font-size:13px}
 .lights li{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)}
 .lights li:last-child{border-bottom:none}
@@ -423,11 +427,16 @@ function levelIsOnish(level) {
 // This device's actual state, read the same way for every desired level:
 // { kind: "dimmer"|"relay"|"unknown", on, brightness }. `brightness` is only
 // meaningful for a dimmer. A device absent from the device list (gone, or a
-// lookup that failed — the zone's own `explain` names which) reads "unknown"
-// rather than guessing at "off", which would hide the very degradation R15
-// asks every part of this plugin to say out loud.
+// lookup that failed — the zone's explain lists it under "unavailable
+// lights") reads "unknown" rather than guessing at "off", which would hide
+// the very degradation R15 asks every part of this plugin to say out loud.
+// A device that IS in the payload but carries no on/off reading at all
+// (`onState` absent at the top level and `states.onOffState` absent too —
+// still starting, or a payload shape this page has not seen) is the same
+// kind of blank: it is not "off", it is "nothing read yet".
 function actualState(dev) {
   if (!dev) return { kind: "unknown" };
+  if (dev.onState == null && (dev.states || {}).onOffState == null) return { kind: "unknown" };
   if (typeof dev.brightness === "number") {
     return { kind: "dimmer", on: !!dev.onState, brightness: dev.onState ? dev.brightness : 0 };
   }
@@ -444,7 +453,7 @@ function actualLabel(dev) {
 // Is `desiredLevel` for this device visibly different from what it is
 // actually doing right now? `"leave"` (the plugin never writes this device)
 // and an unresolved device (nothing to compare against) never mismatch —
-// see the module docstring on why an unknown must not read as a mismatch.
+// see actualState() above on why an unknown must not read as a mismatch.
 function mismatch(desiredLevel, actualDevice) {
   if (desiredLevel == null || desiredLevel === "leave") return false;
   const st = actualState(actualDevice);
@@ -505,9 +514,10 @@ function bandSegments(period) {
 }
 
 // Sort key for "attention order": overridden first, then occupied, vacant,
-// off-duty, disabled last — ties broken by name at the call site. Table-
-// driven-tested directly against the (states, isOffFlag) inputs render()
-// already has on hand, rather than against a whole device object.
+// off-duty, disabled; anything with no state yet after that — ties broken by
+// name at the call site. Table-driven-tested directly against the (states,
+// isOffFlag) inputs render() already has on hand, rather than against a
+// whole device object.
 function sortRank(states, isOffFlag) {
   if (isOffFlag) return 4;
   switch ((states || {}).state) {
@@ -515,7 +525,7 @@ function sortRank(states, isOffFlag) {
     case "occupied": return 1;
     case "vacant": return 2;
     case "off_duty": return 3;
-    default: return 5; // no states yet / unrecognised — last, after disabled
+    default: return 5; // no states yet / unrecognised — after disabled, per the comment above
   }
 }
 
@@ -540,7 +550,7 @@ function chipFor(states, isOffFlag) {
 
 // The one-sentence verdict: the most prominent text on the card, built only
 // from states and the device list — never from parsing `explain`'s prose,
-// which is what the fork's card used to do.
+// which is what the 2026.3.0 card used to do.
 function verdictFor(states, isOffFlag) {
   if (isOffFlag) return "Zone switched off in Indigo.";
   const s = states || {};
@@ -641,7 +651,7 @@ function addParts(hdr, parts) {
   hdr.appendChild(span);
 }
 
-function renderHeader(ctrl, offTargetCount) {
+function renderHeader(ctrl, offTargetCount, unknownCount = 0) {
   const hdr = $("hdr");
   if (!ctrl) { hdr.hidden = true; return; }
   const s = ctrl.states || {};
@@ -660,6 +670,12 @@ function renderHeader(ctrl, offTargetCount) {
   ]);
   if (offTargetCount > 0) {
     addParts(hdr, [{ text: `${offTargetCount} light${offTargetCount === 1 ? "" : "s"} off target`, style: "color:var(--bad)" }]);
+  }
+  // A separate, amber note: these lights were never compared at all (no
+  // on/off reading to compare against), which must not read as silence —
+  // an all-unknown zone would otherwise show 0 off target and look fine.
+  if (unknownCount > 0) {
+    addParts(hdr, [{ text: `${unknownCount} light${unknownCount === 1 ? "" : "s"} unknown`, style: "color:var(--warn)" }]);
   }
   if (s.config_status) addParts(hdr, ["config: ", { text: s.config_status }]);
   const ev = s.evaluations_today != null ? s.evaluations_today : 0;
@@ -745,8 +761,51 @@ function parsePeriodsToday(raw) {
   }
 }
 
+// "HH:MM", strictly -- the same shape `timeToMinutes` accepts, checked
+// separately here because `timeToMinutes` itself must stay total (0 for
+// garbage) for the arithmetic downstream; this is the gate that decides
+// whether an entry is drawn at all.
+const PERIOD_TIME_RE = /^([0-9]{1,2}):([0-9]{2})$/;
+
+function validPeriodEntry(period) {
+  return !!period && typeof period === "object" &&
+    typeof period.name === "string" &&
+    typeof period.from === "string" && PERIOD_TIME_RE.test(period.from) &&
+    typeof period.to === "string" && PERIOD_TIME_RE.test(period.to);
+}
+
+// Splits a parsed `periods_today` array into the entries worth drawing and a
+// count of the ones that are not -- garbage from a payload this page cannot
+// trust wholesale just because it parsed as JSON. The good entries are kept
+// in order, so the strip still reads left-to-right; the bad ones are simply
+// gone from the strip and only survive as a count in the note.
+function splitValidPeriods(periods) {
+  const valid = [];
+  let invalidCount = 0;
+  for (const period of periods) {
+    if (validPeriodEntry(period)) valid.push(period); else invalidCount++;
+  }
+  return { valid, invalidCount };
+}
+
+// The `.strip-note` text under the ticks, or "" for a strip with nothing to
+// say. Combines two independent degradations that can both be true at
+// once: some entries drawn are approximate (the sun fell back -- A2/A3),
+// and some entries in the payload could not be drawn at all (B/8). Pure, so
+// it is unit-tested directly rather than through a DOM diff.
+function stripNoteFor(periods, invalidCount) {
+  const notes = [];
+  if (Array.isArray(periods) && periods.some(p => p && p.approximate)) {
+    notes.push("sun times unavailable — periods drawn at the fixed fallback");
+  }
+  if (invalidCount > 0) {
+    notes.push(`${invalidCount} period entr${invalidCount === 1 ? "y" : "ies"} unreadable`);
+  }
+  return notes.join(" · ");
+}
+
 function buildDayStrip(s) {
-  const { periods, unavailable, malformed } = parsePeriodsToday(s.periods_today);
+  const { periods: rawPeriods, unavailable, malformed } = parsePeriodsToday(s.periods_today);
   if (unavailable) {
     const note = document.createElement("div");
     note.className = "strip-note";
@@ -759,7 +818,21 @@ function buildDayStrip(s) {
     note.textContent = "period data unreadable";
     return note;
   }
-  if (!periods.length) return null;
+  if (!rawPeriods.length) return null;
+
+  const { valid: periods, invalidCount } = splitValidPeriods(rawPeriods);
+  const note = stripNoteFor(periods, invalidCount);
+
+  if (!periods.length) {
+    // Every entry was unreadable: nothing left to draw a strip out of, but
+    // that must still say so rather than looking exactly like "no periods
+    // today" -- the same reasoning as the `unavailable`/`malformed` cases
+    // above, just discovered one entry at a time instead of all at once.
+    const el = document.createElement("div");
+    el.className = "strip-note";
+    el.textContent = note || "period data unreadable";
+    return el;
+  }
 
   const wrap = document.createElement("div");
   wrap.className = "strip-wrap";
@@ -770,10 +843,12 @@ function buildDayStrip(s) {
     const isActive = period.name === s.period;
     for (const seg of bandSegments(period)) {
       const band = document.createElement("div");
-      band.className = "band " + (period.mode === "off_only" ? "off_only" : "on_and_off") + (isActive ? " active" : "");
+      band.className = "band " + (period.mode === "off_only" ? "off_only" : "on_and_off") +
+        (isActive ? " active" : "") + (period.approximate ? " approximate" : "");
       band.style.left = seg.startPct + "%";
       band.style.width = seg.widthPct + "%";
-      band.title = `${period.name} ${period.from}–${period.to} · ${period.mode}`;
+      band.title = `${period.name} ${period.from}–${period.to} · ${period.mode}` +
+        (period.approximate ? " · approximate: sun unavailable, drawn at the fixed fallback" : "");
       if (seg.widthPct >= 12) {
         const label = document.createElement("span");
         label.className = "blabel";
@@ -799,14 +874,24 @@ function buildDayStrip(s) {
     ticks.appendChild(t);
   }
   wrap.appendChild(ticks);
+
+  if (note) {
+    const noteEl = document.createElement("div");
+    noteEl.className = "strip-note";
+    noteEl.textContent = note;
+    wrap.appendChild(noteEl);
+  }
+
   return wrap;
 }
 
-// Returns { el, mismatchCount } so the caller can roll mismatches up into
-// the header's "N lights off target" without re-parsing desired_summary.
+// Returns { el, mismatchCount, unknownCount } so the caller can roll both up
+// into the header ("N lights off target", "N lights unknown") without
+// re-parsing desired_summary or re-resolving each device's actual state.
 function buildLightsSection(s) {
   const { items: lightsArr, unparsedCount } = parseDesired(s.desired_summary);
   let mismatchCount = 0;
+  let unknownCount = 0;
 
   const wrap = document.createElement("div");
   const label = document.createElement("div");
@@ -817,6 +902,9 @@ function buildLightsSection(s) {
   const offTarget = document.createElement("span");
   offTarget.className = "off-target";
   label.appendChild(offTarget);
+  const unknownNote = document.createElement("span");
+  unknownNote.className = "off-unknown";
+  label.appendChild(unknownNote);
   wrap.appendChild(label);
 
   const list = document.createElement("ul");
@@ -825,6 +913,7 @@ function buildLightsSection(s) {
     const dev = deviceById[l.id];
     const isMismatch = mismatch(l.level, dev);
     if (isMismatch) mismatchCount++;
+    if (l.level !== "leave" && actualState(dev).kind === "unknown") unknownCount++;
 
     const li = document.createElement("li");
     if (isMismatch) li.className = "mismatch";
@@ -861,17 +950,41 @@ function buildLightsSection(s) {
   if (mismatchCount > 0) notes.push(`${mismatchCount} off target`);
   if (unparsedCount > 0) notes.push(`${unparsedCount} unparsed`);
   offTarget.textContent = notes.join(" · ");
-  return { el: wrap, mismatchCount };
+  // A third, separate note: every light this card could not resolve at all
+  // (actualState "unknown") is a whole row this card is silently blind to,
+  // not merely off target — it gets its own amber note rather than being
+  // folded into the red "off target" text, which would claim a comparison
+  // this card was never able to make.
+  unknownNote.textContent = unknownCount > 0 ? `${unknownCount} unknown` : "";
+  return { el: wrap, mismatchCount, unknownCount };
+}
+
+// `raw` is `presence_inputs` from a zone's states, straight off the wire.
+// `absent` (raw is null/undefined) is an OLDER plugin that never published
+// this state at all -- the section is simply not there yet, not an error.
+// `malformed` is a raw string this page received but could not parse -- a
+// real degradation, distinct from both `absent` and a genuine "[]" (no
+// inputs configured), and must not be swallowed into either.
+function parsePresenceInputs(raw) {
+  if (raw == null) return { inputs: [], malformed: false, absent: true };
+  try {
+    const parsed = JSON.parse(raw);
+    return { inputs: Array.isArray(parsed) ? parsed : [], malformed: false, absent: false };
+  } catch (_) {
+    return { inputs: [], malformed: true, absent: false };
+  }
 }
 
 function buildPresenceChips(s) {
-  let inputs;
-  try {
-    inputs = JSON.parse(s.presence_inputs);
-  } catch (_) {
-    inputs = [];
+  const { inputs, malformed, absent } = parsePresenceInputs(s.presence_inputs);
+  if (absent) return null;
+  if (malformed) {
+    const note = document.createElement("div");
+    note.className = "strip-note";
+    note.textContent = "presence inputs unreadable";
+    return note;
   }
-  if (!Array.isArray(inputs) || !inputs.length) return null;
+  if (!inputs.length) return null;
 
   const wrap = document.createElement("div");
   const label = document.createElement("div");
@@ -935,8 +1048,8 @@ function buildFooter(dev, s) {
   return foot;
 }
 
-// Returns { el, mismatchCount } — the caller sums mismatchCount across every
-// card for the header's "N lights off target".
+// Returns { el, mismatchCount, unknownCount } — the caller sums both across
+// every card for the header's "N lights off target" / "N lights unknown".
 function buildCard(dev) {
   const hasStates = !!(dev.states && Object.keys(dev.states).length);
   const s = dev.states || {};
@@ -954,7 +1067,7 @@ function buildCard(dev) {
     notice.className = "verdict";
     notice.textContent = "no state reported (device not started?)";
     card.appendChild(notice);
-    return { el: card, mismatchCount: 0 };
+    return { el: card, mismatchCount: 0, unknownCount: 0 };
   }
 
   const subline = buildOverrideSubline(s);
@@ -970,7 +1083,7 @@ function buildCard(dev) {
   const strip = buildDayStrip(s);
   if (strip) card.appendChild(strip);
 
-  const { el: lightsEl, mismatchCount } = buildLightsSection(s);
+  const { el: lightsEl, mismatchCount, unknownCount } = buildLightsSection(s);
   card.appendChild(lightsEl);
 
   const presenceEl = buildPresenceChips(s);
@@ -978,7 +1091,7 @@ function buildCard(dev) {
 
   card.appendChild(buildFooter(dev, s));
 
-  return { el: card, mismatchCount };
+  return { el: card, mismatchCount, unknownCount };
 }
 
 // Called on every successful poll (see `onPollOk`), payload and all. The
@@ -1025,12 +1138,14 @@ function render(all) {
 
   grid.textContent = "";
   let totalMismatches = 0;
+  let totalUnknowns = 0;
   for (const z of zones) {
-    const { el, mismatchCount } = buildCard(z);
+    const { el, mismatchCount, unknownCount } = buildCard(z);
     totalMismatches += mismatchCount;
+    totalUnknowns += unknownCount;
     grid.appendChild(el);
   }
-  renderHeader(ctrl, totalMismatches);
+  renderHeader(ctrl, totalMismatches, totalUnknowns);
 }
 
 // Runs on every successful poll, changed or not, so the banner and the

@@ -170,6 +170,42 @@ def test_a_sun_boundary_that_cannot_be_resolved_warns_and_falls_back(monkeypatch
         assert len(caplog.records) == warned_dates + 1
 
 
+def test_fell_back_on_is_true_only_for_a_date_that_actually_fell_back(monkeypatch, caplog):
+    """`fell_back_on` is the truthful record `_periods_today_json` reads to
+    mark its entries `approximate` -- it must say True for a date that fell
+    back even on a *second* ask (where the log line itself is suppressed),
+    and False for a date the sun answered normally, or one never asked about
+    at all.
+
+    Kills: backing `fell_back_on` with a fresh flag that only tracks whether
+    the WARNING was logged, which would go silently false again on a second
+    fallback for the same date.
+    """
+    import indigo
+
+    def unavailable(date):
+        raise RuntimeError("server not responding")
+
+    monkeypatch.setattr(indigo.server, "calculateSunset", unavailable)
+    sun = IndigoSun(logging.getLogger("test.sun.fell_back_on"))
+    broken_date = dt.date(2026, 9, 4)
+    working_date = dt.date(2026, 9, 5)
+
+    with caplog.at_level(logging.WARNING, logger="test.sun.fell_back_on"):
+        sun.sunset(broken_date)
+        assert sun.fell_back_on(broken_date) is True
+        # A second ask for the same date logs nothing new (see the test
+        # above) but must still read as fallen-back.
+        warned_before = len(caplog.records)
+        sun.sunset(broken_date)
+        assert len(caplog.records) == warned_before
+        assert sun.fell_back_on(broken_date) is True
+
+    assert sun.fell_back_on(working_date) is False, "never asked about at all"
+    sun.sunrise(working_date)  # the fake server answers this one normally
+    assert sun.fell_back_on(working_date) is False, "sunrise answered normally"
+
+
 def test_a_period_that_crosses_midnight_covers_both_sides():
     """"22:30" to "07:00" is active at 23:00 and at 01:00 (R11).
 
@@ -524,3 +560,35 @@ def test_a_period_override_block_replaces_the_zones_timing_while_active():
     dining.ingest_presence(101, True, expiry - dt.timedelta(minutes=1))
     assert dining.evaluate(expiry, "override expiry") is None
     assert dining.override.expires_at == expiry + dt.timedelta(minutes=45)
+
+
+def test_fell_back_on_clears_once_the_server_answers_again(monkeypatch, caplog):
+    """A recovered server is a recovered day: `fell_back_on` follows the most
+    recent answer, not the fact that the date once warned. Kills: backing it
+    with `_warned`, which would keep every strip "approximate" until midnight
+    after one transient failure at 00:00."""
+    import datetime as _dt
+    import logging
+
+    import indigo
+    from lamplighter.periods import IndigoSun
+
+    date = _dt.date(2026, 9, 8)
+    state = {"broken": True}
+
+    def calculate(d):
+        if state["broken"]:
+            raise RuntimeError("server busy")
+        return _dt.datetime.combine(d, _dt.time(19, 15))
+
+    monkeypatch.setattr(indigo.server, "calculateSunrise", calculate, raising=False)
+    monkeypatch.setattr(indigo.server, "calculateSunset", calculate, raising=False)
+    sun = IndigoSun(logging.getLogger("test.sun.recovers"))
+    with caplog.at_level(logging.WARNING, logger="test.sun.recovers"):
+        sun.sunset(date)
+    assert sun.fell_back_on(date) is True
+
+    state["broken"] = False
+    sun.sunset(date)
+    assert sun.fell_back_on(date) is False, "sunset answered normally again"
+

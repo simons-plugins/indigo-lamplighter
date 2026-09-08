@@ -295,7 +295,16 @@ the machine state, so a control page, Domio or a trigger can read them:
 `presence_last_seen`, `lux`, `dark`, `period`, `override_device`,
 `override_expires`, `desired_summary`, `explain` (one line: why the zone is in
 its state), `evaluations_today`, `writes_today`, `overrides_today`,
-`last_trigger`.
+`last_trigger`, `off_duty_cause` (bright/no_period/disabled, only set while
+`state` is off_duty), `periods_today` (this zone's periods resolved to
+today's clock times, as a JSON array -- or the literal string
+`"unavailable"` if the sun could not be read at all; an entry carries
+`"approximate": true` when the sun instead fell back to its fixed time,
+which the string sentinel cannot distinguish from a lookup that failed
+outright), `presence_inputs` (every configured presence device/variable, as
+a JSON array of `{id, kind, on, last}` -- `on` is `true`, `false`, or `null`
+if that input has never been recorded, and `last` marks whichever input's
+edge most recently moved the zone).
 
 Persisted across restarts: `presence_last_seen`, `override_*`, `dark`.
 

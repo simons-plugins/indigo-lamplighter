@@ -756,7 +756,7 @@ def test_off_duty_cause_names_bright_no_period_and_disabled():
 
 def test_periods_today_resolves_a_sunset_relative_period_to_todays_clock_time():
     """The whole reason this state exists: `period_window` does the sun math
-    the fork's page could not, so a caller sees an actual HH:MM rather than
+    the 2026.3.0 page could not, so a caller sees an actual HH:MM rather than
     the "sunset-30m" expression. FixedSun's default sunset is 19:45."""
     zone = two_light_zone(
         periods=[make_period("Dusk", "sunset-30m", "22:00", levels={"201": 50, "202": 50})]
@@ -821,7 +821,8 @@ def test_periods_today_publishes_unavailable_and_warns_once_when_the_sun_fails(c
     itself resolves the active period through the same `self.sun`, and a
     broken sun from the start would take that down too, which is not what
     this test is about. The sun is only broken afterwards, so only
-    `periods_today`'s own resolution (recomputed fresh on every snapshot)
+    `periods_today`'s own resolution -- memoised per date, but `evaluate()`
+    never fills that memo, so the first direct call here computes fresh --
     sees the failure.
     """
 
@@ -855,7 +856,12 @@ def test_periods_today_publishes_unavailable_and_warns_once_when_the_sun_fails(c
     assert first == "unavailable"
     assert second == "unavailable"
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1  # warned once, not once per snapshot
+    # Two records on the *first* occurrence -- the summary line and a
+    # `exc_info=True` traceback, so a raised exception here (a programming
+    # error; the real sun never raises -- see the docstring) is not a single
+    # trace-less line -- and neither repeats on the second call.
+    assert len(warnings) == 2
+    assert warnings[1].exc_info is not None
 
     # A failure must never be memoised: the same-day cache is only ever
     # written on the success path (see `_periods_today_cache = (today, text)`
@@ -868,6 +874,62 @@ def test_periods_today_publishes_unavailable_and_warns_once_when_the_sun_fails(c
     assert third != "unavailable"
     parsed = json.loads(third)
     assert parsed and parsed[0]["name"] == "Dusk"
+
+
+def test_periods_today_marks_every_entry_approximate_and_excludes_the_day_from_the_memo():
+    """A sun that fell back (`fell_back_on` True) must not publish its
+    resolved times as though they were real: every entry gets
+    `"approximate": true`, and the day must not be memoised, so a server
+    that recovers mid-day is re-asked on the very next call instead of
+    riding out the fallback until midnight (A2).
+
+    Kills: publishing the resolved times unmarked, and caching the
+    approximate answer in `_periods_today_cache`.
+    """
+    from helpers import FixedSun
+
+    class FellBackSun(FixedSun):
+        def __init__(self):
+            super().__init__()
+            self.sunset_calls = 0
+
+        def sunset(self, date):
+            self.sunset_calls += 1
+            return super().sunset(date)
+
+        def fell_back_on(self, date):
+            return True
+
+    sun = FellBackSun()
+    zone = two_light_zone(
+        periods=[make_period("Dusk", "sunset-30m", "22:00", levels={"201": 50, "202": 50})],
+        sun=sun,
+    )
+    zone.evaluate(NOW, "setup")
+
+    first = json.loads(zone._periods_today_json(NOW))
+    assert first and all(entry["approximate"] is True for entry in first)
+
+    calls_after_first = sun.sunset_calls
+    zone._periods_today_json(NOW)
+    # Not memoised: a second call on the same date asks the sun again.
+    assert sun.sunset_calls > calls_after_first
+
+
+def test_periods_today_treats_a_sun_without_fell_back_on_as_never_falling_back():
+    """Older/test suns -- `helpers.FixedSun` among them -- do not implement
+    `fell_back_on` at all. Its absence must read as "no fallback happened",
+    not raise and not mark every entry approximate by accident.
+
+    Kills: calling `self.sun.fell_back_on(...)` unconditionally, which would
+    raise `AttributeError` against a sun that predates this attribute.
+    """
+    zone = two_light_zone(
+        periods=[make_period("Dusk", "sunset-30m", "22:00", levels={"201": 50, "202": 50})]
+    )
+    zone.evaluate(NOW, "setup")
+    entries = json.loads(zone._periods_today_json(NOW))
+    assert entries and all("approximate" not in entry for entry in entries)
 
 
 # ------------------------------------------------------------ presence_inputs
