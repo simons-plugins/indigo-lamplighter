@@ -17,6 +17,7 @@ it bail out through `showErr()` rather than trying to open a real
 connection, which is why only a minimal `document` stub is needed.
 """
 
+import datetime
 import json
 import os
 import shutil
@@ -25,6 +26,17 @@ import textwrap
 from html.parser import HTMLParser
 
 import pytest
+
+
+def dt_ms(iso_local):
+    """`iso_local` (no timezone, "YYYY-MM-DDTHH:MM:SS") as epoch milliseconds
+    in the LOCAL timezone -- the same interpretation node's `new Date(iso)`
+    (no `Z`/offset) and `new Date(y,m,d,...)` both use, so a Python-computed
+    expected value and node's actual one are comparable without pinning a
+    timezone into the test itself."""
+    naive = datetime.datetime.strptime(iso_local, "%Y-%m-%dT%H:%M:%S")
+    local = naive.astimezone()
+    return int(local.timestamp() * 1000)
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 PAGE_PATH = os.path.join(
@@ -478,22 +490,18 @@ def test_parseperiodstoday_garbage_is_flagged_malformed_not_silently_empty(tmp_p
     assert result != {"periods": [], "unavailable": False, "malformed": False}
 
 
-def test_builddaystrip_renders_a_note_for_malformed_period_data(tmp_path):
-    """`buildDayStrip` must surface `malformed` the same way it already
-    surfaces `unavailable` -- a `.strip-note` element, not a silently empty
-    strip -- so a corrupt `periods_today` value is visible on the card, not
+def test_periodsfortimeline_notes_malformed_period_data(tmp_path):
+    """`periodsForTimeline` must surface `malformed` the same way it already
+    surfaces `unavailable` -- a note, not a silently empty periods lane --
+    so a corrupt `periods_today` value is visible on the card, not
     indistinguishable from an ordinary "no periods configured" zone."""
     driver = """
-        document.createElement = () => ({ className: "", textContent: "" });
-        const el = buildDayStrip({ period: "Evening", periods_today: "{not json" });
-        console.log(JSON.stringify({
-            className: el.className,
-            text: el.textContent,
-        }));
+        const r = periodsForTimeline({ period: "Evening", periods_today: "{not json" });
+        console.log(JSON.stringify({ periods: r.periods, note: r.note }));
     """
-    output = _run_page_logic(tmp_path, driver, name="builddaystrip_malformed.js")
-    assert output["className"] == "strip-note"
-    assert output["text"] == "period data unreadable"
+    output = _run_page_logic(tmp_path, driver, name="periodsfortimeline_malformed.js")
+    assert output["periods"] == []
+    assert output["note"] == "period data unreadable"
 
 
 # --------------------------------------------- validPeriodEntry / splitValidPeriods
@@ -592,62 +600,35 @@ def test_stripnotefor_joins_both_degradations_when_both_apply(tmp_path):
     )
 
 
-# --------------------------------- buildDayStrip: approximate bands, mixed validity
+# --------------------------------- periodsForTimeline: approximate bands, mixed validity
 
-_FAKE_DOM_STUB = """
-function makeEl() {
-    return {
-        className: "", style: {}, textContent: "", title: "",
-        children: [],
-        appendChild(child) { this.children.push(child); },
-    };
-}
-document.createElement = () => makeEl();
-"""
-
-
-def test_builddaystrip_marks_an_approximate_entry_and_adds_the_strip_note(tmp_path):
-    """The band for an `approximate: true` entry carries the `approximate`
-    class and a title suffix, and the strip itself carries the sun-fallback
-    note under the ticks (A3). Kills: rendering an approximate entry
-    identically to a real one, or dropping the note."""
-    driver = (
-        _FAKE_DOM_STUB
-        + """
+def test_periodsfortimeline_marks_an_approximate_entry_and_notes_it(tmp_path):
+    """An `approximate: true` entry survives into `periods` (the caller draws
+    the `.approximate` class from it) and the sun-fallback note appears
+    (A3). Kills: dropping the flag, or dropping the note."""
+    driver = """
         const s = {
             period: "Dusk",
             periods_today: JSON.stringify([
                 { name: "Dusk", from: "17:30", to: "23:00", mode: "on_and_off", approximate: true },
             ]),
         };
-        const wrap = buildDayStrip(s);
-        const strip = wrap.children[0];
-        const band = strip.children[0];
-        const note = wrap.children[wrap.children.length - 1];
+        const r = periodsForTimeline(s);
         console.log(JSON.stringify({
-            bandClassName: band.className,
-            bandTitle: band.title,
-            noteClassName: note.className,
-            noteText: note.textContent,
+            approximate: r.periods[0].approximate,
+            note: r.note,
         }));
     """
-    )
-    output = _run_page_logic(tmp_path, driver, name="builddaystrip_approximate.js")
-    assert "approximate" in output["bandClassName"].split(" ")
-    assert output["bandTitle"].endswith(
-        "approximate: sun unavailable, drawn at the fixed fallback"
-    )
-    assert output["noteClassName"] == "strip-note"
-    assert output["noteText"] == "sun times unavailable — periods drawn at the fixed fallback"
+    output = _run_page_logic(tmp_path, driver, name="periodsfortimeline_approximate.js")
+    assert output["approximate"] is True
+    assert output["note"] == "sun times unavailable — periods drawn at the fixed fallback"
 
 
-def test_builddaystrip_drops_only_the_unreadable_entries_and_notes_the_count(tmp_path):
+def test_periodsfortimeline_drops_only_the_unreadable_entries_and_notes_the_count(tmp_path):
     """One good period and one malformed one in the same payload: the good
-    one is still drawn, the bad one is counted in the strip note rather than
-    silently vanishing or taking the whole strip down."""
-    driver = (
-        _FAKE_DOM_STUB
-        + """
+    one is kept, the bad one is counted in the note rather than silently
+    vanishing or taking the whole lane down."""
+    driver = """
         const s = {
             period: "Dusk",
             periods_today: JSON.stringify([
@@ -655,18 +636,15 @@ def test_builddaystrip_drops_only_the_unreadable_entries_and_notes_the_count(tmp
                 { name: "Broken", from: "sunset-30m", to: "19:00", mode: "on_and_off" },
             ]),
         };
-        const wrap = buildDayStrip(s);
-        const strip = wrap.children[0];
-        const note = wrap.children[wrap.children.length - 1];
+        const r = periodsForTimeline(s);
         console.log(JSON.stringify({
-            bandCount: strip.children.filter(c => (c.className || "").includes("band")).length,
-            noteText: note.textContent,
+            names: r.periods.map(p => p.name),
+            note: r.note,
         }));
     """
-    )
-    output = _run_page_logic(tmp_path, driver, name="builddaystrip_mixed_validity.js")
-    assert output["bandCount"] == 1
-    assert output["noteText"] == "1 period entry unreadable"
+    output = _run_page_logic(tmp_path, driver, name="periodsfortimeline_mixed_validity.js")
+    assert output["names"] == ["Dusk"]
+    assert output["note"] == "1 period entry unreadable"
 
 
 # ---------------------------------------------------- parsePresenceInputs (table-driven)
@@ -738,6 +716,18 @@ def test_buildpresencechips_renders_a_note_for_malformed_presence_inputs(tmp_pat
     assert output["text"] == "presence inputs unreadable"
 
 
+_FAKE_DOM_STUB = """
+function makeEl() {
+    return {
+        className: "", style: {}, textContent: "", title: "",
+        children: [],
+        appendChild(child) { this.children.push(child); },
+    };
+}
+document.createElement = () => makeEl();
+"""
+
+
 # --------------------------------------------- buildLightsSection: unknownCount
 
 def test_buildlightssection_counts_unresolved_lights_separately_from_mismatches(tmp_path):
@@ -760,3 +750,226 @@ def test_buildlightssection_counts_unresolved_lights_separately_from_mismatches(
     output = _run_page_logic(tmp_path, driver, name="buildlightssection_unknown.js")
     assert output["unknownCount"] == 1
     assert output["mismatchCount"] == 0
+
+
+# ------------------------------------------- timeline pure helpers (table-driven)
+
+
+def test_pctofday_clamps_to_0_100(tmp_path):
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        console.log(JSON.stringify({
+            before: pctOfDay(new Date(2026, 8, 7, 23, 0, 0), dayStart),
+            noon: pctOfDay(new Date(2026, 8, 8, 12, 0, 0), dayStart),
+            after: pctOfDay(new Date(2026, 8, 9, 1, 0, 0), dayStart),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="pctofday.js")
+    assert output["before"] == 0
+    assert abs(output["noon"] - 50) < 0.01
+    assert output["after"] == 100
+
+
+def test_intervalsfromstates_carries_in_the_state_at_midnight(tmp_path):
+    """A state event from YESTERDAY (before dayStart) still puts the zone
+    in that state from 00:00 -- the whole reason history keeps 48h."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 6, 0, 0);
+        const events = [
+            { t: "2026-09-07T23:40:00", k: "state", to: "occupied", from: "vacant" },
+            { t: "2026-09-08T05:00:00", k: "state", to: "vacant", from: "occupied" },
+        ];
+        const { occupied } = intervalsFromStates(events, dayStart, now);
+        console.log(JSON.stringify({
+            start: occupied[0][0] === dayStart.getTime(),
+            count: occupied.length,
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="intervalsfromstates_carryin.js")
+    assert output["start"] is True
+    assert output["count"] == 1
+
+
+def test_intervalsfromstates_an_event_exactly_at_now_is_included(tmp_path):
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 6, 0, 0);
+        const events = [
+            { t: "2026-09-08T06:00:00", k: "state", to: "occupied", from: "vacant" },
+        ];
+        const { occupied } = intervalsFromStates(events, dayStart, now);
+        console.log(JSON.stringify({ occupied }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="intervalsfromstates_at_now.js")
+    # The state starts exactly at `now`, so the interval is zero-width and
+    # closeSeg() drops it -- nothing to draw, and that is correct: there is
+    # no elapsed time in "occupied" yet.
+    assert output["occupied"] == []
+
+
+def test_intervalsfromstates_empty_events_is_no_intervals_not_a_crash(tmp_path):
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 6, 0, 0);
+        const { occupied, overridden } = intervalsFromStates([], dayStart, now);
+        console.log(JSON.stringify({ occupied, overridden }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="intervalsfromstates_empty.js")
+    assert output == {"occupied": [], "overridden": []}
+
+
+def test_levelintervals_with_no_prior_event_draws_nothing_until_the_first_report(tmp_path):
+    """Kills: defaulting an unknown starting level to 0 (which would draw
+    nothing, indistinguishable in the data from a genuinely-off light) or to
+    some positive guess (which would draw a fill nobody reported)."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 6, 0, 0);
+        const events = [
+            { t: "2026-09-08T05:00:00", k: "light", id: 201, level: 60 },
+        ];
+        const before = levelIntervals(events, 201, dayStart, new Date(2026, 8, 8, 4, 0, 0), null);
+        const after = levelIntervals(events, 201, dayStart, now, null);
+        console.log(JSON.stringify({ before, after }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="levelintervals_unknown_start.js")
+    assert output["before"] == []
+    assert len(output["after"]) == 1
+    assert output["after"][0][2] == 60
+
+
+def test_levelintervals_carries_in_a_level_from_before_midnight(tmp_path):
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 1, 0, 0);
+        const events = [
+            { t: "2026-09-07T22:00:00", k: "light", id: 201, level: 40 },
+        ];
+        const intervals = levelIntervals(events, 201, dayStart, now, null);
+        console.log(JSON.stringify({ intervals }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="levelintervals_carryin.js")
+    assert output["intervals"] == [[dt_ms("2026-09-08T00:00:00"), dt_ms("2026-09-08T01:00:00"), 40]]
+
+
+def test_unionintervals_merges_overlapping_and_adjacent(tmp_path):
+    driver = """
+        console.log(JSON.stringify({
+            u: unionIntervals([[0, 10], [5, 15], [20, 30]]),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="unionintervals.js")
+    assert output["u"] == [[0, 15], [20, 30]]
+
+
+def test_intersectintervals_returns_only_the_overlap(tmp_path):
+    driver = """
+        console.log(JSON.stringify({
+            x: intersectIntervals([[0, 10]], [[5, 20]]),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="intersectintervals.js")
+    assert output["x"] == [[5, 10]]
+
+
+def test_subtractintervals_removes_the_overlap(tmp_path):
+    driver = """
+        console.log(JSON.stringify({
+            x: subtractIntervals([[0, 10]], [[3, 6]]),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="subtractintervals.js")
+    assert output["x"] == [[0, 3], [6, 10]]
+
+
+def test_minutesof_empty_is_zero_not_nan(tmp_path):
+    driver = """
+        console.log(JSON.stringify({ m: minutesOf([]) }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="minutesof_empty.js")
+    assert output["m"] == 0
+
+
+def test_minutesof_sums_interval_durations(tmp_path):
+    driver = """
+        console.log(JSON.stringify({ m: minutesOf([[0, 60000], [0, 120000]]) }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="minutesof.js")
+    assert output["m"] == 3  # 1 min + 2 min
+
+
+def test_statsfor_with_no_events_is_all_zeros_not_nan(tmp_path):
+    """Kills: any stat computed as a division or ratio that produces NaN on
+    an empty zone rather than an honest 0."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 6, 0, 0);
+        console.log(JSON.stringify(statsFor([], [201, 202], dayStart, now)));
+    """
+    output = _run_page_logic(tmp_path, driver, name="statsfor_empty.js")
+    assert output == {
+        "occupiedMinutes": 0,
+        "lightsOnMinutes": 0,
+        "onWhileEmptyMinutes": 0,
+        "hereLightsOffMinutes": 0,
+        "overrideCount": 0,
+        "cycles": 0,
+    }
+
+
+def test_statsfor_flags_lights_on_while_the_zone_was_not_occupied(tmp_path):
+    """The 'on while empty' stat is lights-on MINUS occupied MINUS
+    overridden -- this pins the subtraction, not just that some number comes
+    out non-zero."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 3, 0, 0);
+        const events = [
+            { t: "2026-09-08T01:00:00", k: "light", id: 201, level: 60 },
+        ];
+        console.log(JSON.stringify(statsFor(events, [201], dayStart, now)));
+    """
+    output = _run_page_logic(tmp_path, driver, name="statsfor_waste.js")
+    assert output["lightsOnMinutes"] == 120  # 01:00-03:00
+    assert output["occupiedMinutes"] == 0
+    assert output["onWhileEmptyMinutes"] == 120
+    assert output["hereLightsOffMinutes"] == 0
+    assert output["cycles"] == 1
+
+
+def test_statsfor_a_gap_marker_event_does_not_break_the_computation(tmp_path):
+    """Kills: assuming every event has the fields a `state`/`light`/`write`
+    event carries, which a bare `{"k": "gap"}` does not -- a crash here
+    would take the whole card's stats row down over a truncation marker."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 6, 0, 0);
+        const events = [{ t: "2026-09-08T02:00:00", k: "gap" }];
+        console.log(JSON.stringify(statsFor(events, [201], dayStart, now)));
+    """
+    output = _run_page_logic(tmp_path, driver, name="statsfor_gap.js")
+    assert output["occupiedMinutes"] == 0
+    assert output["cycles"] == 0
+
+
+@pytest.mark.parametrize("name,zone,expected", [
+    ("Kitchen Pendants", "Kitchen", "Pendants"),
+    ("Kitchen - LED Strip", "Kitchen", "LED Strip"),
+    ("DiningRoom - Shelves", "Dining Room", "Shelves"),
+    ("Kitchen", "Kitchen", "Kitchen"),
+    ("A very long light name indeed here", "", "A very long light…"),
+])
+def test_lanelabel_drops_the_zone_prefix_then_truncates(tmp_path, name, zone, expected):
+    """The lane label column is narrow; a light named after its zone must show
+    the distinguishing part. Kills: truncating before stripping (every kitchen
+    light reads "Kitchen Pen…"), and blanking a light whose whole name IS the
+    zone name."""
+    import json
+    driver = f"""
+        const out = {{ label: laneLabel({json.dumps(name)}, {json.dumps(zone)}) }};
+        console.log(JSON.stringify(out));
+    """
+    output = _run_page_logic(tmp_path, driver, name="lanelabel.js")
+    assert output["label"] == expected
+

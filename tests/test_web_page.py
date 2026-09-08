@@ -84,8 +84,12 @@ def test_an_up_to_date_page_is_not_rewritten(install, monkeypatch, caplog):
             raise AssertionError(f"page must not be written: open({file!r}, {mode!r})")
         return real_open(file, mode, *args, **kwargs)
 
-    def guarded_replace(*_a, **_k):
-        raise AssertionError("page must not be written: os.replace")
+    def guarded_replace(src, dst, *_a, **_k):
+        # Only the page's own destination is forbidden here -- startup also
+        # writes the (unrelated) history data file on every run, by design,
+        # regardless of "Manage the status page" (see test_history.py).
+        if str(dst) in forbidden_paths:
+            raise AssertionError("page must not be written: os.replace")
 
     def guarded_copy(*_a, **_k):
         raise AssertionError("page must not be written: shutil.copy*")

@@ -104,6 +104,7 @@ CONTROLLER_STATE_KEYS = (
     "config_status",
     "config_loaded_at",
     "config_zone_count",
+    "history_status",
 )
 
 #: Persisted fields that are numbers. Everything else is a timestamp string
@@ -190,7 +191,11 @@ def _zone_state(key, value) -> dict:
 
 
 def controller_states(
-    engine, config_status="ok", config_loaded_at="", config_zone_count=0
+    engine,
+    config_status="ok",
+    config_loaded_at="",
+    config_zone_count=0,
+    history_status="ok",
 ) -> list:
     """The controller device's states: the zones counted, the counters summed.
 
@@ -209,6 +214,12 @@ def controller_states(
     They exist because every other state here moves on an ordinary worker
     pass, so a caller watching for "the file was reloaded" has nothing to
     watch. These two move only when a load succeeds.
+
+    ``history_status`` (PRD section 12) is "ok" or the reason the timeline's
+    data file could not be written -- the same "quiet zero is forbidden"
+    reasoning as ``config_status``: a status page reading an empty or stale
+    timeline has no way to tell "nothing happened" from "the write failed"
+    without this.
     """
     zones = list(engine.zones.values())
     counts = {
@@ -236,6 +247,8 @@ def controller_states(
     )
     count = int(config_zone_count or 0)
     states.append({"key": "config_zone_count", "value": count, "uiValue": str(count)})
+    history = str(history_status or "ok")
+    states.append({"key": "history_status", "value": history, "uiValue": history})
     return states
 
 

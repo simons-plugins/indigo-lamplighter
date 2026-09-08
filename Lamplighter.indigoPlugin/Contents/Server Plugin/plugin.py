@@ -39,7 +39,9 @@ try:
 except ImportError:  # pragma: no cover - only true outside the Indigo host
     pass
 
+from lamplighter import compare
 from lamplighter import devices as device_lookup
+from lamplighter import history as history_module
 from lamplighter import indigo_sync, persist
 from lamplighter.config import Config, ConfigError, load_config
 from lamplighter.engine import Engine
@@ -57,6 +59,19 @@ CONFIG_FILENAME = "lamplighter.json"
 #: (issue #27 there) so the pattern is consistent across the workspace.
 WEB_PAGE_FILENAME = "lamplighter.html"
 WEB_PAGE_BUNDLE_DIR = "Lamplighter.indigoPlugin"
+
+#: The per-zone history the status page's timeline reads (PRD section 12),
+#: written alongside the page in the same Web Assets directory. Unlike the
+#: page itself this is data the plugin GENERATES, not a bundled file it
+#: copies -- so it is written whether or not "Manage the status page" is
+#: ticked; see `_write_history`.
+HISTORY_FILENAME = "lamplighter-history.json"
+
+#: How often the worker flushes history to disk when there is something new
+#: to write. A cap, not a poll: the flush itself is a no-op when nothing has
+#: been recorded since the last one (`History.dirty`), so a quiet house
+#: costs nothing between writes either way.
+HISTORY_WRITE_INTERVAL_SECONDS = 30.0
 
 #: What a fresh install gets written for it. It is deliberately a document the
 #: loader *refuses* -- ``zones`` may not be empty in a configured file -- so
@@ -257,6 +272,15 @@ class Plugin(indigo.PluginBase):
         self._config_loaded_at = ""
         self._config_zone_count = 0
 
+        #: The timeline's data source (PRD section 12). Built here, not in
+        #: startup(), so a test that never calls startup() can still exercise
+        #: it, matching how `self.engine` starts as None rather than absent.
+        self.history = history_module.History(logger=self.logger)
+        self._history_status = "ok"
+        #: When history was last written, or None before the first attempt --
+        #: the floor `_write_history` checks against HISTORY_WRITE_INTERVAL_SECONDS.
+        self._history_last_write = None
+
     # ------------------------------------------------------------- lifecycle
 
     def _record_config_loaded(self, config, now):
@@ -311,12 +335,15 @@ class Plugin(indigo.PluginBase):
             if complaint:
                 self.logger.info(f"Lamplighter: {complaint} ({self.config_file}).")
 
+        self._load_history()
+
         self.engine = Engine(
             config,
             self.sun,
             IndigoCommander(logger=self.logger),
             logger=self.logger,
             on_zone_changed=self._zone_changed,
+            history=self.history,
         )
         if loaded:
             self._record_config_loaded(config, dt.datetime.now())
@@ -341,6 +368,7 @@ class Plugin(indigo.PluginBase):
             f"{self.config_file}."
         )
         self._sync_web_page()
+        self._write_history(dt.datetime.now(), force=True)
 
     def shutdown(self):
         # No super().shutdown() -- the base class does not define one.
@@ -348,6 +376,9 @@ class Plugin(indigo.PluginBase):
             # Last chance to put the override and the presence timestamp onto
             # the devices: they are what a restart restores from.
             self._sync_all()
+        # Last chance for the timeline too -- whatever was recorded since the
+        # last periodic flush must not be lost to a restart.
+        self._write_history(dt.datetime.now(), force=True)
         self.logger.debug("Lamplighter: shutdown")
 
     def closedPrefsConfigUi(self, values_dict, user_cancelled):
@@ -459,6 +490,7 @@ class Plugin(indigo.PluginBase):
                     self.logger.exception("Lamplighter: the worker pass raised")
                 self._sync_controller()
                 self._check_config_file(dt.datetime.now())
+                self._write_history(dt.datetime.now())
                 self.sleep(self._loop_delay(dt.datetime.now()))
         except self.StopThread:
             pass
@@ -1054,6 +1086,7 @@ class Plugin(indigo.PluginBase):
                 self._config_status,
                 config_loaded_at=self._config_loaded_at,
                 config_zone_count=self._config_zone_count,
+                history_status=self._history_status,
             )
         )
         if bool(dev.onState) != bool(self.engine.plugin_enabled):
@@ -1148,6 +1181,108 @@ class Plugin(indigo.PluginBase):
         )
         dest_dir = os.path.join(install, "Web Assets", "static", "pages")
         return source, dest_dir, os.path.join(dest_dir, WEB_PAGE_FILENAME)
+
+    @staticmethod
+    def _history_path(install):
+        """Where the timeline's data file lives -- same directory as the
+        page itself (`_web_page_paths`), so one Web Assets folder holds both,
+        but a file the plugin writes on its own schedule rather than copies
+        from the bundle."""
+        _source, dest_dir, _dest = Plugin._web_page_paths(install)
+        return os.path.join(dest_dir, HISTORY_FILENAME)
+
+    def _load_history(self):
+        """Read back whatever history survived a restart. Best-effort.
+
+        Called from startup(), before the engine exists, so the very first
+        events recorded once it starts land on top of history the plugin
+        already had rather than an empty store. A missing file (a fresh
+        install, or history has never been written) is not a problem worth
+        naming -- it is `History.load`'s own job to warn about a file that
+        exists but will not parse.
+        """
+        try:
+            install = indigo.server.getInstallFolderPath()
+            path = self._history_path(install)
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.debug(
+                f"Lamplighter: could not determine the history file's path "
+                f"({exc}); starting today's history empty"
+            )
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                text = handle.read()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            self.logger.warning(
+                f"Lamplighter: could not read the history file at {path} ({exc}); "
+                "starting today's history empty"
+            )
+            return
+        self.history.load(text, now=dt.datetime.now())
+
+    def _write_history(self, now, force=False):
+        """Flush the timeline's data file, at most every
+        HISTORY_WRITE_INTERVAL_SECONDS and only when there is something new.
+
+        Deliberately independent of the "Manage the status page" pref: that
+        pref governs a bundled HTML file the plugin copies, and this is data
+        the plugin itself generates -- untying them is called out in the
+        PRD precisely so a user who hand-edits the page still gets a working
+        timeline. Failure never raises: it is warned once (the path
+        changing between failures re-arms the warning, same as everywhere
+        else `compare.warn_once` is used) and surfaced on the controller
+        device's `history_status` state, and history keeps recording in
+        memory regardless -- a filesystem problem must not stop the plugin
+        deciding anything about a light.
+        """
+        if not force and not self.history.dirty:
+            return
+        if (
+            not force
+            and self._history_last_write is not None
+            and (now - self._history_last_write).total_seconds() < HISTORY_WRITE_INTERVAL_SECONDS
+        ):
+            return
+
+        try:
+            install = indigo.server.getInstallFolderPath()
+            dest = self._history_path(install)
+        except Exception as exc:  # pylint: disable=broad-except
+            self._set_history_status(f"could not determine the history file's path ({exc})")
+            return
+
+        dest_dir = os.path.dirname(dest)
+        tmp = f"{dest}.tmp"
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            text = self.history.to_json(now)
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.replace(tmp, dest)
+        except OSError as exc:
+            leftover = self._cleanup_tmp(tmp)
+            compare.warn_once(
+                self.logger,
+                ("history-write", dest),
+                f"Lamplighter: could not write the history file at {dest} ({exc}).{leftover} "
+                "History keeps recording in memory, but the status page's timeline will "
+                "not reflect it until this is fixed.",
+            )
+            self._set_history_status(f"write failed: {exc}")
+            return
+        self.history.dirty = False
+        self._history_last_write = now
+        self._set_history_status("ok")
+
+    def _set_history_status(self, status):
+        if status == self._history_status:
+            return
+        self._history_status = status
+        if self.engine is not None:
+            self._sync_controller()
 
     @staticmethod
     def _cleanup_tmp(tmp):

@@ -309,7 +309,12 @@ edge most recently moved the zone).
 Persisted across restarts: `presence_last_seen`, `override_*`, `dark`.
 
 A plugin-level `lamplighter_controller` device carries the global enable and
-the counters summed, so "all automation off" is one device.
+the counters summed, so "all automation off" is one device. It also carries
+`config_status`, `config_loaded_at`, `config_zone_count` (the last
+successful configuration load) and `history_status` (§12: "ok", or the
+reason the status page timeline's data file could not be written --
+independent of `config_status`, since that file is data the plugin
+generates, not the configuration it is running).
 
 ### 5.11 Configuration
 
@@ -495,7 +500,7 @@ handler follows the configured level from startup.
   `1949753199` *is* the control for the strips group. The plugin then mirrors
   press/dial itself (retiring the `indigo-scripts` wall_mirror triggers), and
   an override is known from the control, not inferred from the light.
-- **Read-only status page** through IWS — shipped in 2026.3.0 (see README "Status page"): zones, state, explain, period, lux, presence, override, desired levels, counters. Redesigned in 2026.4.0: a plain-English verdict sentence, a desired-vs-actual lights list with mismatch markers, a 24-hour day strip of today's periods, and presence-input chips, all read directly from new zone states (`off_duty_cause`, `periods_today`, `presence_inputs`) rather than parsed out of `explain`'s prose.
+- **Read-only status page** through IWS — shipped in 2026.3.0 (see README "Status page"): zones, state, explain, period, lux, presence, override, desired levels, counters. Redesigned in 2026.4.0: a plain-English verdict sentence, a desired-vs-actual lights list with mismatch markers, a 24-hour day strip of today's periods, and presence-input chips, all read directly from new zone states (`off_duty_cause`, `periods_today`, `presence_inputs`) rather than parsed out of `explain`'s prose. Redesigned again in 2026.5.0: the green/hatched day strip read as "lights are on" to its own user rather than "this is the schedule", and showed only the schedule, never what happened. It is replaced by a per-zone 24-hour timeline -- today's periods as context, then presence, each light's actual reported level, override spans and off-duty-bright/gap marks, all read from a new bounded per-zone event log (`lamplighter/history.py`, 48h retention, capped at 5000 events/zone with a `gap` marker if the cap is ever what trims) that the plugin writes to `Web Assets/static/pages/lamplighter-history.json` independently of "Manage the status page" (that pref governs the bundled HTML file; the history file is data the plugin generates on its own schedule, at most every 30s when something new happened). A stats row under each timeline (occupied / lights-on / on-while-empty / here-with-lights-off / overrides / on-off cycles) is computed client-side from the same event log, so hold times and lux thresholds can be tuned by looking rather than guessing.
 - **Adaptive hold**: learn `hold_seconds` per zone from presence gap
   statistics (the Dining study: 5 min bridges 69 % of gaps, 55 min needed).
 - **Scenes** as named level sets a period or an action can reference.

@@ -1607,3 +1607,112 @@ def test_a_zone_device_from_before_an_upgrade_is_filled_in_too(install):
     # "leave" because nothing has evaluated this zone yet -- the value is not
     # the point, having one at all is.
     assert upgraded.states["desired_summary"] == "201=leave"
+
+
+# ---------------------------------------------------------------- history
+
+
+def _history_text(install, plugin_module_ref):
+    path = plugin_module_ref.Plugin._history_path(str(install))
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def test_startup_loads_an_existing_history_file(install):
+    """Kills: never reading the file back, which would reset the timeline to
+    empty on every restart even though 48 hours of it survived on disk."""
+    import json
+    import os
+
+    path = plugin_module.Plugin._history_path(str(install))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "version": 1,
+                "generated_at": "2026-09-08T12:00:00",
+                "retention_hours": 48,
+                "zones": {
+                    "Hallway": {
+                        "events": [
+                            {"t": "2026-09-08T12:00:00", "k": "state", "to": "occupied"}
+                        ]
+                    }
+                },
+            },
+            handle,
+        )
+
+    the_plugin = started(a_document())
+
+    assert "Hallway" in the_plugin.history.zones
+    assert the_plugin.history.zones["Hallway"].events[0]["to"] == "occupied"
+
+
+def test_a_worker_pass_writes_history_no_more_often_than_the_interval(install):
+    """Kills: writing on every worker pass regardless of the interval, which
+    would put a filesystem write on the hot path of every single tick in a
+    busy house."""
+    the_plugin = started(a_document())
+    the_plugin._history_last_write = None  # ignore startup's own baseline flush
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    first_now = dt.datetime.now()
+    the_plugin._write_history(first_now)
+    assert the_plugin._history_last_write == first_now
+
+    the_plugin.history.record_write("Hallway", first_now, 201, "off")
+    soon = first_now + dt.timedelta(seconds=1)
+    the_plugin._write_history(soon)
+    assert the_plugin._history_last_write == first_now, (
+        "a second write inside the interval must be a no-op"
+    )
+
+    later = first_now + dt.timedelta(seconds=plugin_module.HISTORY_WRITE_INTERVAL_SECONDS + 1)
+    the_plugin._write_history(later)
+    assert the_plugin._history_last_write == later
+
+
+def test_a_quiet_pass_writes_nothing_at_all(install):
+    """Kills: writing unconditionally every interval even with nothing new
+    recorded -- a quiet house at 3 a.m. should cost zero filesystem writes."""
+    the_plugin = started(a_document())
+    the_plugin._history_last_write = None
+    the_plugin.history.dirty = False
+
+    the_plugin._write_history(dt.datetime.now())
+
+    assert the_plugin._history_last_write is None
+
+
+def test_shutdown_flushes_history_even_inside_the_interval(install):
+    """Kills: relying only on the periodic flush, which would lose whatever
+    was recorded since the last one on every ordinary plugin restart."""
+    the_plugin = started(a_document())
+    the_plugin._write_history(dt.datetime.now(), force=True)  # establish a baseline
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    the_plugin.shutdown()
+
+    text = _history_text(install, plugin_module)
+    import json
+
+    payload = json.loads(text)
+    events = payload["zones"]["Hallway"]["events"]
+    assert any(e["k"] == "write" for e in events)
+
+
+def test_a_history_write_failure_is_named_on_the_controller_device(install, monkeypatch):
+    """Kills: swallowing a write failure with no visible trace -- an empty
+    timeline and a broken write must not look the same (R15)."""
+    the_plugin = started(a_document())
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(plugin_module.os, "replace", boom)
+    the_plugin._write_history(dt.datetime.now(), force=True)
+
+    assert "disk full" in the_plugin._history_status
+    assert "disk full" in controller_device().states["history_status"]
