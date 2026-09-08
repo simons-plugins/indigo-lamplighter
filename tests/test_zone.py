@@ -8,7 +8,9 @@ The acceptance promises are in tests/test_promises_*.py. These sit under
 them, in the same relationship test_compare.py has to the override promises.
 """
 
+import dataclasses
 import datetime as dt
+import json
 import logging
 
 import pytest
@@ -694,6 +696,9 @@ def test_the_snapshot_is_only_strings_numbers_and_booleans():
         "writes_today",
         "overrides_today",
         "last_trigger",
+        "off_duty_cause",
+        "periods_today",
+        "presence_inputs",
     }
     for key, value in states.items():
         assert isinstance(value, (str, int, float, bool)), key
@@ -703,6 +708,7 @@ def test_the_snapshot_is_only_strings_numbers_and_booleans():
     assert states["override_device"] == 201
     assert states["dark"] is True
     assert states["period"] == "Evening"
+    assert states["off_duty_cause"] == ""  # overridden, not off-duty
 
 
 def test_an_absent_value_is_the_empty_string_never_a_zero():
@@ -715,6 +721,251 @@ def test_an_absent_value_is_the_empty_string_never_a_zero():
     assert states["presence_last_seen"] == ""
     assert states["override_device"] == ""
     assert states["override_expires"] == ""
+
+
+# --------------------------------------------------------------- off_duty_cause
+
+
+def test_off_duty_cause_is_empty_when_not_off_duty():
+    """Mutant: publishing the last-known cause instead of clearing it once
+    the zone leaves OFF-DUTY -- the status page would show a stale badge."""
+    zone = occupy(two_light_zone())
+    assert zone.state is ZoneState.OCCUPIED
+    assert zone.snapshot()["off_duty_cause"] == ""
+
+
+def test_off_duty_cause_names_bright_no_period_and_disabled():
+    zone = two_light_zone()
+    zone.ingest_lux(9000, NOW)  # above dark_below (2200) + hysteresis (300): bright
+    zone.evaluate(NOW, "daylight")
+    assert zone.snapshot()["off_duty_cause"] == "bright"
+
+    zone = two_light_zone(periods=[evening()])
+    zone.ingest_lux(1800, NOW)
+    zone.evaluate(dt.datetime(2026, 9, 4, 2, 0, 0), "no period covers 02:00")
+    assert zone.snapshot()["off_duty_cause"] == "no_period"
+
+    zone = two_light_zone()
+    zone.set_enabled(enabled=False)
+    zone.evaluate(NOW, "disabled")
+    assert zone.snapshot()["off_duty_cause"] == "disabled"
+
+
+# --------------------------------------------------------------- periods_today
+
+
+def test_periods_today_resolves_a_sunset_relative_period_to_todays_clock_time():
+    """The whole reason this state exists: `period_window` does the sun math
+    the 2026.3.0 page could not, so a caller sees an actual HH:MM rather than
+    the "sunset-30m" expression. FixedSun's default sunset is 19:45."""
+    zone = two_light_zone(
+        periods=[make_period("Dusk", "sunset-30m", "22:00", levels={"201": 50, "202": 50})]
+    )
+    zone.evaluate(NOW, "setup")
+    periods = json.loads(zone.snapshot()["periods_today"])
+
+    assert periods == [{"name": "Dusk", "from": "19:15", "to": "22:00", "mode": "on_and_off"}]
+
+
+def test_periods_today_emits_a_midnight_crossing_period_with_to_before_from():
+    """Mutant: normalising the wrap so `to` reads later than `from` -- the
+    page's own wrap-handling (bandSegments) would then draw a backwards band
+    that never triggers, or two full-width ones."""
+    zone = two_light_zone(
+        periods=[make_period("Night", "22:00", "06:00", levels={"201": 10, "202": 10})]
+    )
+    zone.evaluate(dt.datetime(2026, 9, 4, 23, 0, 0), "setup")
+    periods = json.loads(zone.snapshot()["periods_today"])
+
+    assert periods == [{"name": "Night", "from": "22:00", "to": "06:00", "mode": "on_and_off"}]
+    assert periods[0]["to"] < periods[0]["from"]
+
+
+def test_periods_today_includes_hold_seconds_and_limit_only_when_the_period_sets_them():
+    zone = two_light_zone(
+        periods=[
+            make_period(
+                "Evening", "18:00", "23:00", levels={"201": 60, "202": 30},
+                hold_seconds=900, limit=80,
+            )
+        ]
+    )
+    zone.evaluate(NOW, "setup")
+    period = json.loads(zone.snapshot()["periods_today"])[0]
+    assert period["hold_seconds"] == 900
+    assert period["limit"] == 80
+
+    plain = two_light_zone()  # evening() sets neither
+    plain.evaluate(NOW, "setup")
+    plain_period = json.loads(plain.snapshot()["periods_today"])[0]
+    assert "hold_seconds" not in plain_period
+    assert "limit" not in plain_period
+
+
+def test_periods_today_is_the_empty_list_for_a_zone_with_no_periods():
+    # The schema requires at least one period on load (minItems: 1), so the
+    # empty case is built by hand: ZoneConfig is frozen, and this is the
+    # only way to reach it without going through the loader.
+    zone = two_light_zone()
+    zone.config = dataclasses.replace(zone.config, periods=())
+    zone.evaluate(NOW, "setup")
+    assert zone.snapshot()["periods_today"] == "[]"
+
+
+def test_periods_today_publishes_unavailable_and_warns_once_when_the_sun_fails(caplog):
+    """A failed sun lookup must not read as "this zone has no periods" (R15):
+    that is a real, different answer and the two must not collapse into the
+    same "[]" on the wire. Mutant: swallowing the exception into "[]".
+
+    The zone is built and evaluated with a working sun first -- `evaluate`
+    itself resolves the active period through the same `self.sun`, and a
+    broken sun from the start would take that down too, which is not what
+    this test is about. The sun is only broken afterwards, so only
+    `periods_today`'s own resolution -- memoised per date, but `evaluate()`
+    never fills that memo, so the first direct call here computes fresh --
+    sees the failure.
+    """
+
+    class BrokenSun:
+        def sunrise(self, date):
+            raise RuntimeError("indigo.server.calculateSunrise failed")
+
+        def sunset(self, date):
+            raise RuntimeError("indigo.server.calculateSunrise failed")
+
+    # A clock-only period (like evening()) never asks the sun anything --
+    # resolve() only calls it for a sunrise/sunset expression -- so this
+    # needs a period that actually depends on it.
+    zone = two_light_zone(
+        periods=[make_period("Dusk", "sunset-30m", "22:00", levels={"201": 50, "202": 50})]
+    )
+    zone.evaluate(NOW, "setup")
+    working_sun = zone.sun
+    zone.sun = BrokenSun()
+
+    # `_periods_today_json` directly: `snapshot()` also resolves the active
+    # period through the same `self.sun` for `period`/`desired_summary`, and
+    # in production those never see a raw exception -- the real sun
+    # (`periods.IndigoSun`) already catches every failure itself and falls
+    # back to a fixed time. This method's own try/except is what still has
+    # to hold if something else is ever handed in as the sun.
+    with caplog.at_level(logging.WARNING):
+        first = zone._periods_today_json(NOW)
+        second = zone._periods_today_json(NOW)
+
+    assert first == "unavailable"
+    assert second == "unavailable"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    # Two records on the *first* occurrence -- the summary line and a
+    # `exc_info=True` traceback, so a raised exception here (a programming
+    # error; the real sun never raises -- see the docstring) is not a single
+    # trace-less line -- and neither repeats on the second call.
+    assert len(warnings) == 2
+    assert warnings[1].exc_info is not None
+
+    # A failure must never be memoised: the same-day cache is only ever
+    # written on the success path (see `_periods_today_cache = (today, text)`
+    # above the exception), so restoring a working sun on the SAME date has
+    # to produce real JSON on the very next ask, not a cached "unavailable"
+    # ridden out until midnight. Mutant: caching `(today, "unavailable")` in
+    # the except branch.
+    zone.sun = working_sun
+    third = zone._periods_today_json(NOW)
+    assert third != "unavailable"
+    parsed = json.loads(third)
+    assert parsed and parsed[0]["name"] == "Dusk"
+
+
+def test_periods_today_marks_every_entry_approximate_and_excludes_the_day_from_the_memo():
+    """A sun that fell back (`fell_back_on` True) must not publish its
+    resolved times as though they were real: every entry gets
+    `"approximate": true`, and the day must not be memoised, so a server
+    that recovers mid-day is re-asked on the very next call instead of
+    riding out the fallback until midnight (A2).
+
+    Kills: publishing the resolved times unmarked, and caching the
+    approximate answer in `_periods_today_cache`.
+    """
+    from helpers import FixedSun
+
+    class FellBackSun(FixedSun):
+        def __init__(self):
+            super().__init__()
+            self.sunset_calls = 0
+
+        def sunset(self, date):
+            self.sunset_calls += 1
+            return super().sunset(date)
+
+        def fell_back_on(self, date):
+            return True
+
+    sun = FellBackSun()
+    zone = two_light_zone(
+        periods=[make_period("Dusk", "sunset-30m", "22:00", levels={"201": 50, "202": 50})],
+        sun=sun,
+    )
+    zone.evaluate(NOW, "setup")
+
+    first = json.loads(zone._periods_today_json(NOW))
+    assert first and all(entry["approximate"] is True for entry in first)
+
+    calls_after_first = sun.sunset_calls
+    zone._periods_today_json(NOW)
+    # Not memoised: a second call on the same date asks the sun again.
+    assert sun.sunset_calls > calls_after_first
+
+
+def test_periods_today_treats_a_sun_without_fell_back_on_as_never_falling_back():
+    """Older/test suns -- `helpers.FixedSun` among them -- do not implement
+    `fell_back_on` at all. Its absence must read as "no fallback happened",
+    not raise and not mark every entry approximate by accident.
+
+    Kills: calling `self.sun.fell_back_on(...)` unconditionally, which would
+    raise `AttributeError` against a sun that predates this attribute.
+    """
+    zone = two_light_zone(
+        periods=[make_period("Dusk", "sunset-30m", "22:00", levels={"201": 50, "202": 50})]
+    )
+    zone.evaluate(NOW, "setup")
+    entries = json.loads(zone._periods_today_json(NOW))
+    assert entries and all("approximate" not in entry for entry in entries)
+
+
+# ------------------------------------------------------------ presence_inputs
+
+
+def test_presence_inputs_lists_devices_and_variables_with_on_and_last():
+    import indigo
+
+    indigo.variables[9001] = indigo.Variable(9001, name="SimonHome", value="true")
+    zone = two_light_zone(presence_devices=[101, 102], presence_variables=[9001])
+
+    # 9001 activates first (nothing else on: an ACTIVATED edge), then 101
+    # merely refreshes an already-occupied room -- an any-of REFRESHED edge,
+    # not a fresh activation -- so 9001 is the input that "last" mattered.
+    zone.ingest_presence(9001, True, NOW)
+    zone.ingest_presence(101, True, NOW)
+    # 102 never reports at all: it must stay unknown, not read as "off".
+    zone.evaluate(NOW, "setup")
+
+    inputs = {entry["id"]: entry for entry in json.loads(zone.snapshot()["presence_inputs"])}
+
+    assert inputs[101] == {"id": 101, "kind": "device", "on": True, "last": False}
+    assert inputs[102] == {"id": 102, "kind": "device", "on": None, "last": False}
+    assert inputs[9001] == {
+        "id": 9001, "kind": "variable", "on": True, "last": True, "name": "variable SimonHome",
+    }
+
+
+def test_presence_inputs_on_is_none_until_an_input_is_actually_ingested():
+    """Mutant: defaulting an un-ingested input's `on` to False, which reads
+    identically to "we asked and it said off" on the status page."""
+    zone = two_light_zone(presence_devices=[101, 102])
+    zone.evaluate(NOW, "setup")
+    inputs = {entry["id"]: entry for entry in json.loads(zone.snapshot()["presence_inputs"])}
+    assert inputs[101]["on"] is None
+    assert inputs[102]["on"] is None
 
 
 # ---------------------------------------------------------- resolving lights
@@ -924,3 +1175,43 @@ def test_asking_whether_an_override_holds_agrees_with_ageing_it(
 
     assert answer is (aged.override is not None)
     assert asked.override is not None, "asking released the lock"
+
+
+def test_periods_today_asks_the_sun_once_per_date_not_once_per_snapshot():
+    """snapshot() runs on every evaluation and the sun answer cannot move
+    before midnight, so a second snapshot on the same date must come from the
+    memo. Kills the mutation that drops the cache: with it gone the sun is
+    asked again and this count doubles."""
+    import datetime as _dt
+
+    from helpers import FixedSun
+
+    class CountingSun(FixedSun):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def sunset(self, date):
+            self.calls += 1
+            return super().sunset(date)
+
+    sun = CountingSun()
+    zone = two_light_zone(
+        periods=[make_period("Dusk", "sunset-30m", "22:00", levels={"201": 50, "202": 50})],
+        sun=sun,
+    )
+    zone.evaluate(NOW, "setup")
+    # `_periods_today_json` directly rather than snapshot(): snapshot() also
+    # resolves the active period and the plan, which ask the sun on their
+    # own account and would hide the memo behind their calls.
+    first = zone._periods_today_json(NOW)
+    calls_after_first = sun.calls
+    assert calls_after_first >= 1
+    second = zone._periods_today_json(NOW)
+
+    assert second == first
+    assert sun.calls == calls_after_first
+
+    # A new date is a new answer: the memo is keyed by date, not "forever".
+    zone._periods_today_json(NOW + _dt.timedelta(days=1))
+    assert sun.calls > calls_after_first

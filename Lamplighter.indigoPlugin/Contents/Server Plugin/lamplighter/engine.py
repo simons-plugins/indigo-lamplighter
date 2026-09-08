@@ -446,8 +446,9 @@ class Engine:
         seen *now* -- an occupied room at startup is occupied now, and the
         hold should run from now rather than from a timestamp nobody has -- 
         and the lux sensor is read so the first verdict comes from a reading
-        instead of a default. A device reporting off changes nothing:
-        presence ends by the hold expiring, never by a sensor going quiet.
+        instead of a default. A device reporting off does not touch
+        presence -- presence ends by the hold expiring, never by a sensor
+        going quiet -- but its reading is remembered for the status page.
 
         Returns the zones that still could not be read, which stay unseeded
         and are retried on the next tick.
@@ -497,9 +498,14 @@ class Engine:
                 # picked up here and holds the zone occupied, which a
                 # persisted timestamp on its own could not do.
                 zone.ingest_presence(device_id, True, now)
-            # Deliberately no `else: ingest(..., False, ...)`. An "off" now
-            # stamps last_seen, so seeding the off devices would push the hold
-            # forward on every seed and an empty room would never time out.
+            else:
+                # Deliberately NOT `ingest(..., False, ...)`. An "off" now
+                # stamps last_seen, so seeding the off devices would push the
+                # hold forward on every seed and an empty room would never
+                # time out. The reading itself is still worth remembering:
+                # the status page's presence chips read `last_value`, and
+                # "off" is the honest answer, "never asked" is not.
+                zone.presence.last_value[device_id] = False
 
         for var_id in zone.config.presence_variables:
             try:
@@ -518,6 +524,8 @@ class Engine:
                 # occupied, not "never seen" (the 2026-09-05 defect for a
                 # sensor, repeated here for a variable would be the same bug).
                 zone.ingest_presence(var_id, True, now)
+            else:
+                zone.presence.last_value[var_id] = False  # same as the device case above
 
         zone.read_lux(now)
 

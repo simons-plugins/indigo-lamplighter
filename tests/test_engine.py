@@ -771,7 +771,7 @@ def test_a_zone_reads_its_lux_sensor_before_its_first_decision():
     assert zone.lux.verdict is True, "1200 is below the 2200 threshold"
 
 
-def test_a_presence_device_reporting_off_at_seeding_changes_nothing():
+def test_a_presence_device_reporting_off_at_seeding_does_not_touch_presence_but_is_remembered():
     """Presence ends by the hold expiring, never by a sensor being quiet.
 
     Kills: ingesting the reading whatever it says, which stamps `last_seen`
@@ -783,6 +783,35 @@ def test_a_presence_device_reporting_off_at_seeding_changes_nothing():
 
     engine.seed_inputs(clock.now)
 
+    assert zone.presence.last_seen is None
+    # ...but the reading is remembered for the status page's presence chips:
+    # "off" (False), not "never asked" (absent). Kills the mutation that
+    # skips off devices entirely and leaves every chip dashed after a restart.
+    assert zone.presence.last_value == {101: False}
+
+
+def test_a_presence_variable_reporting_false_at_seeding_does_not_touch_presence_but_is_remembered():
+    """Same promise as the device twin above, for a presence VARIABLE:
+    seeding a variable that already reads "false" must not stamp last_seen,
+    but the reading is still remembered for the status page's presence
+    chips.
+
+    Kills: deleting the `else` branch in `Engine._seed_zone` that reads
+    `indigo.variables[...]` for a configured presence variable -- the zone
+    would stay permanently unseeded for that input instead of recording an
+    "off" reading.
+    """
+    import indigo
+
+    engine, zone, clock, _changed = build(presence_variables=[SIMON_HOME])
+    indigo.variables[SIMON_HOME] = indigo.Variable(SIMON_HOME, "SimonHome", "false")
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.seed_inputs(clock.now)
+
+    assert zone.presence.last_value == {SIMON_HOME: False}
     assert zone.presence.last_seen is None
 
 

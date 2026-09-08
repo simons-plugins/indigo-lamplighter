@@ -104,6 +104,24 @@
                 <ControlPageLabel>Last Trigger</ControlPageLabel>
             </State>
 
+            <!-- v2026.4.0 (status page redesign): states the 2026.3.0 card used
+                 to scrape out of `explain`'s prose instead of reading directly. -->
+            <State id="off_duty_cause">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Off Duty Cause</TriggerLabel>
+                <ControlPageLabel>Off Duty Cause</ControlPageLabel>
+            </State>
+            <State id="periods_today">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Periods Today (JSON)</TriggerLabel>
+                <ControlPageLabel>Periods Today</ControlPageLabel>
+            </State>
+            <State id="presence_inputs">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Presence Inputs (JSON)</TriggerLabel>
+                <ControlPageLabel>Presence Inputs</ControlPageLabel>
+            </State>
+
             <!-- The persisted record (PRD 5.10, "Persisted across restarts").
                  Written as strings so that "never decided" survives as "" and
                  does not come back from a boolean state as False. -->

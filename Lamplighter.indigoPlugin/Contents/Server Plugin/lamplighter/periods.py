@@ -157,12 +157,28 @@ class IndigoSun:
     def __init__(self, logger=None):
         self.logger = logger or logging.getLogger("Plugin")
         self._warned: set = set()
+        #: (date, kind) -> whether the LAST answer for it was the fallback.
+        #: Separate from ``_warned``, which only remembers that a date warned:
+        #: a server that recovers mid-morning must read as recovered, or the
+        #: status page would call the real sunset "approximate" until midnight.
+        self._on_fallback: dict = {}
 
     def sunrise(self, date: dt.date) -> dt.datetime:
         return self._ask("sunrise", indigo.server.calculateSunrise, date, FALLBACK_SUNRISE)
 
     def sunset(self, date: dt.date) -> dt.datetime:
         return self._ask("sunset", indigo.server.calculateSunset, date, FALLBACK_SUNSET)
+
+    def fell_back_on(self, date: dt.date) -> bool:
+        """Did either sunrise or sunset fall back to the fixed time on ``date``?
+
+        True while the most recent sunrise OR sunset answer for ``date`` came
+        from the fixed time; it clears as soon as the server answers again,
+        so a caller publishing a status for ``date`` says "approximate" for
+        exactly as long as it is, rather than showing 06:00/18:00 as though
+        they were real times (and rather than tarring a recovered day).
+        """
+        return any(fell and d == date for (d, _kind), fell in self._on_fallback.items())
 
     def _ask(self, kind, call, date, fallback):
         try:
@@ -177,11 +193,13 @@ class IndigoSun:
                 # here relies on, so convert rather than discover it later as
                 # a TypeError comparing aware to naive.
                 value = value.astimezone().replace(tzinfo=None)
+            self._on_fallback[(date, kind)] = False
             return value
 
         return self._fall_back(kind, date, fallback, f"returned {value!r}, not a datetime")
 
     def _fall_back(self, kind, date, fallback, reason):
+        self._on_fallback[(date, kind)] = True
         if date not in self._warned:
             self._warned.add(date)
             self.logger.warning(

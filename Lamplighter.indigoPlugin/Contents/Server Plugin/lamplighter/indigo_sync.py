@@ -41,6 +41,8 @@ both directions:
 
 from __future__ import annotations
 
+import json
+
 #: The zone device's live states, in the order PRD section 5.10 lists them.
 #: This tuple, ``zone.snapshot()``'s keys and the ``<State>`` ids in
 #: Devices.xml are pinned equal by ``tests/test_indigo_sync.py`` -- a state
@@ -62,6 +64,11 @@ ZONE_STATE_KEYS = (
     "writes_today",
     "overrides_today",
     "last_trigger",
+    # v2026.4.0 (status page redesign): the states the 2026.3.0 card used to
+    # scrape out of `explain`'s prose instead of reading directly.
+    "off_duty_cause",
+    "periods_today",
+    "presence_inputs",
 )
 
 #: What separates a persisted field from a live one on the same device.
@@ -160,6 +167,23 @@ def _zone_state(key, value) -> dict:
     if key in ("presence_last_seen", "override_expires"):
         text = str(value or "")
         return {"key": key, "value": text, "uiValue": _clock(text) or "never"}
+
+    if key in ("periods_today", "presence_inputs"):
+        # JSON text for the status page (5.10); the uiValue is a count
+        # rather than the raw JSON so a control page reads something a
+        # person wants, not a payload meant for `JSON.parse`.
+        text = str(value) if value not in (None, "") else "[]"
+        noun = "period" if key == "periods_today" else "input"
+        if text == "unavailable":
+            return {"key": key, "value": text, "uiValue": "unavailable"}
+        count = _json_list_length(text)
+        # A JSON value that will not parse is not "0 periods" -- that reads
+        # exactly like a zone with nothing configured (R15). `uiValue` says
+        # so directly; `value` still carries the raw text so a caller that
+        # parses it themselves is not denied the chance to.
+        if count is None:
+            return {"key": key, "value": text, "uiValue": "unreadable"}
+        return {"key": key, "value": text, "uiValue": f"{count} {noun}{'' if count == 1 else 's'}"}
 
     text = str(value or "")
     return {"key": key, "value": text, "uiValue": text or "none"}
@@ -305,6 +329,20 @@ def _as_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _json_list_length(text):
+    """The length of a JSON array published as a state, or None if it will
+    not parse into one -- never 0, which reads as a real, empty answer and
+    is indistinguishable from a zone that genuinely has nothing configured
+    (R15). A uiValue must never raise over a value only meant for display,
+    so this itself still cannot raise; the caller turns None into the
+    'unreadable' uiValue."""
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    return len(parsed) if isinstance(parsed, list) else None
 
 
 def _clock(iso_timestamp) -> str:
