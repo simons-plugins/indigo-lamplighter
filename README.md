@@ -236,11 +236,25 @@ see the other's writes as manual overrides.
 
 The plugin bundles a read-only status page: one card per zone with its state,
 a plain-English verdict, the period, lux and presence facts, any manual
-override with its owner and expiry, a strip of today's periods with a "now"
-marker, every light with the level the zone wants next to what the light is
-actually doing, the presence inputs and which one fired last, and the raw
-engine reasoning behind a disclosure. The header shows the controller's
-enable, zone counts, configuration status and today's totals.
+override with its owner and expiry, every light with the level the zone
+wants next to what the light is actually doing, the presence inputs and
+which one fired last, and the raw engine reasoning behind a disclosure. The
+header shows the controller's enable, zone counts, configuration status and
+today's totals.
+
+Each card also carries a 24-hour timeline of what actually happened today --
+today's periods as context, then presence, each light's actual reported
+level, and any override or off-duty-bright marks, with a "now" line and a
+stats row underneath (occupied time, lights-on time, lights left on with
+nobody there, time spent in the room with the lights off, overrides, on/off
+cycles) so hold times and lux thresholds can be tuned by looking. It reads
+from a rolling 48-hour window kept in a history file the plugin has written
+since 2026.5.0 (older than that, and old enough to age out, both truncate
+the window rather than keep growing -- a `⋯` marker on the timeline says
+when that happened), written to
+`Web Assets/static/pages/lamplighter-history.json` independently of the
+page itself -- it keeps accumulating even if you hand-edit the bundled
+HTML.
 
 ![The status page on a phone](docs/images/lamplighter-status-page-phone.png)
 

@@ -1607,3 +1607,319 @@ def test_a_zone_device_from_before_an_upgrade_is_filled_in_too(install):
     # "leave" because nothing has evaluated this zone yet -- the value is not
     # the point, having one at all is.
     assert upgraded.states["desired_summary"] == "201=leave"
+
+
+# ---------------------------------------------------------------- history
+
+
+def _history_text(install, plugin_module_ref):
+    path = plugin_module_ref.Plugin._history_path(str(install))
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def test_startup_loads_an_existing_history_file(install):
+    """Kills: never reading the file back, which would reset the timeline to
+    empty on every restart even though 48 hours of it survived on disk."""
+    import json
+    import os
+
+    path = plugin_module.Plugin._history_path(str(install))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "version": 1,
+                "generated_at": "2026-09-08T12:00:00",
+                "retention_hours": 48,
+                "zones": {
+                    "Hallway": {
+                        "events": [
+                            {"t": "2026-09-08T12:00:00", "k": "state", "to": "occupied"}
+                        ]
+                    }
+                },
+            },
+            handle,
+        )
+
+    the_plugin = started(a_document())
+
+    assert "Hallway" in the_plugin.history.zones
+    assert the_plugin.history.zones["Hallway"].events[0]["to"] == "occupied"
+
+
+def test_startup_force_writes_a_version_1_history_file(install):
+    """Kills: skipping the startup `_write_history(force=True)` call, or
+    writing an envelope whose `version` does not match what `History`
+    itself claims to write -- the status page's poll must never 404 or
+    choke on a version mismatch on a fresh install that has recorded
+    nothing yet."""
+    started(a_document())
+
+    payload = json.loads(_history_text(install, plugin_module))
+    assert payload["version"] == 1
+    assert "zones" in payload
+
+
+def test_a_successful_write_clears_dirty_so_the_next_interval_writes_nothing(install):
+    """Kills: `_write_history` never clearing `history.dirty` on a
+    successful write (or clearing it and then putting it back
+    unconditionally) -- a quiet house would then get a filesystem write on
+    every single periodic pass forever, not just after something changed."""
+    the_plugin = started(a_document())
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    the_plugin._write_history(dt.datetime.now(), force=True)
+
+    assert the_plugin.history.dirty is False
+
+
+def test_a_worker_pass_writes_history_no_more_often_than_the_interval(install):
+    """Kills: writing on every worker pass regardless of the interval, which
+    would put a filesystem write on the hot path of every single tick in a
+    busy house."""
+    the_plugin = started(a_document())
+    the_plugin._history_last_write = None  # ignore startup's own baseline flush
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    first_now = dt.datetime.now()
+    the_plugin._write_history(first_now)
+    assert the_plugin._history_last_write == first_now
+
+    the_plugin.history.record_write("Hallway", first_now, 201, "off")
+    soon = first_now + dt.timedelta(seconds=1)
+    the_plugin._write_history(soon)
+    assert the_plugin._history_last_write == first_now, (
+        "a second write inside the interval must be a no-op"
+    )
+
+    later = first_now + dt.timedelta(seconds=plugin_module.HISTORY_WRITE_INTERVAL_SECONDS + 1)
+    the_plugin._write_history(later)
+    assert the_plugin._history_last_write == later
+
+
+def test_a_quiet_pass_inside_the_heartbeat_writes_nothing_at_all(install):
+    """Kills: writing unconditionally every interval even with nothing new
+    recorded -- a quiet house at 3 a.m. should cost one write per heartbeat,
+    not one per interval."""
+    the_plugin = started(a_document())
+    now = dt.datetime.now()
+    the_plugin._history_last_write = now - dt.timedelta(seconds=plugin_module.HISTORY_HEARTBEAT_SECONDS / 2)
+    the_plugin.history.dirty = False
+
+    the_plugin._write_history(now)
+
+    assert the_plugin._history_last_write < now
+
+
+def test_a_quiet_house_still_gets_a_heartbeat_write(install):
+    """Kills: gating the write on `dirty` alone. With nothing recorded for an
+    evening the file's generated_at would freeze, and the page could not tell
+    a quiet house from a plugin that had stopped writing."""
+    the_plugin = started(a_document())
+    now = dt.datetime.now()
+    the_plugin._history_last_write = now - dt.timedelta(seconds=plugin_module.HISTORY_HEARTBEAT_SECONDS + 1)
+    the_plugin.history.dirty = False
+
+    the_plugin._write_history(now)
+
+    assert the_plugin._history_last_write == now
+
+
+def test_shutdown_flushes_history_even_inside_the_interval(install):
+    """Kills: relying only on the periodic flush, which would lose whatever
+    was recorded since the last one on every ordinary plugin restart."""
+    the_plugin = started(a_document())
+    the_plugin._write_history(dt.datetime.now(), force=True)  # establish a baseline
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    the_plugin.shutdown()
+
+    text = _history_text(install, plugin_module)
+    import json
+
+    payload = json.loads(text)
+    events = payload["zones"]["Hallway"]["events"]
+    assert any(e["k"] == "write" for e in events)
+
+
+def test_a_history_write_failure_is_named_on_the_controller_device(install, monkeypatch):
+    """Kills: swallowing a write failure with no visible trace -- an empty
+    timeline and a broken write must not look the same (R15)."""
+    the_plugin = started(a_document())
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(plugin_module.os, "replace", boom)
+    the_plugin._write_history(dt.datetime.now(), force=True)
+
+    assert "disk full" in the_plugin._history_status
+
+
+def test_a_write_failure_restores_dirty_so_the_next_flush_retries(install, monkeypatch):
+    """Kills: clearing `dirty` unconditionally in `snapshot_and_clear` and
+    never putting it back on a write failure -- the event that failed to
+    reach disk would then never be retried, silently missing from the
+    timeline forever."""
+    the_plugin = started(a_document())
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    monkeypatch.setattr(
+        plugin_module.os, "replace",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    the_plugin._write_history(dt.datetime.now(), force=True)
+
+    assert the_plugin.history.dirty is True
+
+
+def test_a_write_failure_that_is_not_an_oserror_is_still_caught(install, monkeypatch):
+    """Kills: narrowing the write's except clause back to `OSError` -- a
+    write failure can come from anything the filesystem layer raises, and
+    the whole point of R15 here is that none of it may end the worker."""
+    the_plugin = started(a_document())
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    monkeypatch.setattr(
+        plugin_module.os, "replace",
+        lambda *a, **k: (_ for _ in ()).throw(TypeError("not a real filesystem error")),
+    )
+    the_plugin._write_history(dt.datetime.now(), force=True)  # must not raise
+
+    assert "not a real filesystem error" in the_plugin._history_status
+    assert the_plugin.history.dirty is True
+
+
+def test_a_recovered_write_resets_the_warning_for_a_later_separate_failure(install, monkeypatch, caplog):
+    """Kills: latching the write-failure warning forever once it has fired
+    once -- a filesystem problem that clears and then recurs later (a full
+    disk, freed, then filled again) must be reported again, not silently
+    swallowed the second time because the first warning is still 'active'."""
+    the_plugin = started(a_document())
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+    real_replace = plugin_module.os.replace  # `plugin_module.os` IS the real `os`
+
+    monkeypatch.setattr(
+        plugin_module.os, "replace",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    with caplog.at_level("WARNING"):
+        the_plugin._write_history(dt.datetime.now(), force=True)
+    first_warnings = [r for r in caplog.records if "could not write the history file" in r.getMessage()]
+    assert len(first_warnings) == 1
+    caplog.clear()
+
+    # Recovers: the next write succeeds and must be an INFO, not silence.
+    monkeypatch.setattr(plugin_module.os, "replace", real_replace)
+    with caplog.at_level("INFO"):
+        the_plugin._write_history(dt.datetime.now(), force=True)
+    recoveries = [r for r in caplog.records if "being written again" in r.getMessage()]
+    assert len(recoveries) == 1
+    caplog.clear()
+
+    # Fails again: this must warn a SECOND time, not stay silent because the
+    # (already-cleared) warning key looks like it already fired.
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "off")
+    monkeypatch.setattr(
+        plugin_module.os, "replace",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full again")),
+    )
+    with caplog.at_level("WARNING"):
+        the_plugin._write_history(dt.datetime.now(), force=True)
+    second_warnings = [r for r in caplog.records if "could not write the history file" in r.getMessage()]
+    assert len(second_warnings) == 1
+
+
+def test_makedirs_failing_does_not_claim_a_partial_file_was_left(install, monkeypatch):
+    """Kills: `_cleanup_tmp` claiming a partial `.tmp` file was left behind
+    when the failure happened at `os.makedirs`, before the temp file was
+    ever created -- there is nothing there for the user to go delete."""
+    the_plugin = started(a_document())
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    monkeypatch.setattr(
+        plugin_module.os, "makedirs",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("permission denied")),
+    )
+    the_plugin._write_history(dt.datetime.now(), force=True)
+
+    assert "partial file" not in the_plugin._history_status
+
+
+def test_a_worker_pass_survives_write_history_raising(install, monkeypatch):
+    """Kills: leaving `_write_history` outside the try/except that guards
+    `engine.tick` in `runConcurrentThread` -- a history-write bug would then
+    end the worker thread entirely, taking every zone's future decisions
+    with it, not just the timeline."""
+    the_plugin = started(a_document())
+    the_plugin.stop_after_sleeps = 2
+
+    def boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(the_plugin, "_write_history", boom)
+
+    the_plugin.runConcurrentThread()  # must not raise
+
+    assert len(the_plugin.slept) == 2, "the loop survived the raise and slept again"
+
+
+def test_an_unreadable_history_file_is_warned_about_not_silently_ignored(install, caplog):
+    """Kills: narrowing `_load_history`'s except clause to `ValueError`
+    only (or dropping it entirely) -- a directory sitting where the file
+    should be raises a plain `OSError` (`IsADirectoryError`), the opposite
+    branch from the UnicodeDecodeError/ValueError case pinned right below,
+    and startup must degrade to an empty history rather than crash (R15)."""
+    path = plugin_module.Plugin._history_path(str(install))
+    os.makedirs(path, exist_ok=True)  # a directory where the file should be -> OSError
+
+    with caplog.at_level("WARNING"):
+        the_plugin = started(a_document())  # must not raise
+
+    assert the_plugin.engine is not None, "startup completed rather than aborting"
+    assert any("could not read the history file" in r.getMessage() for r in caplog.records)
+
+
+def test_load_history_survives_a_file_that_is_not_valid_utf8(install, caplog):
+    """Kills: catching only `OSError` around the history file's read --
+    `open(..., encoding='utf-8')` raises `UnicodeDecodeError` (a
+    `ValueError`, not an `OSError`) on invalid bytes, which would otherwise
+    propagate straight out of `_load_history` and take startup down (R15)."""
+    path = plugin_module.Plugin._history_path(str(install))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(b"\xff\xfe\x00 not valid utf-8 at all \xfa")
+
+    with caplog.at_level("WARNING"):
+        the_plugin = started(a_document())  # must not raise
+
+    assert the_plugin.engine is not None, "startup completed rather than aborting"
+    assert any("could not read the history file" in r.getMessage() for r in caplog.records)
+
+
+def test_managepage_off_does_not_stop_the_history_file_being_written(install):
+    """Kills: coupling history's write to the 'Manage the status page' pref
+    -- history is data the plugin generates, not the bundled page it copies,
+    and the PRD calls out untying them explicitly so a user who hand-edits
+    the page still gets a working timeline. See test_web_page.py's own
+    coverage of `_sync_web_page` staying off; this is the history side of
+    the same 'Manage the status page: false' scenario."""
+    document = a_document()
+    write_config(document)
+    make_device(101, "relay", name="Hallway Motion")
+    make_device(201, "relay", name="Hallway Light")
+    the_plugin = plugin_module.Plugin(
+        plugin_module.PLUGIN_ID, "Lamplighter", "2026.0.1",
+        {"log_level": logging.INFO, "managePage": False},
+    )
+    the_plugin.startup()
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    the_plugin._write_history(dt.datetime.now(), force=True)
+
+    text = _history_text(install, plugin_module)
+    payload = json.loads(text)
+    assert any(e["k"] == "write" for e in payload["zones"]["Hallway"]["events"])

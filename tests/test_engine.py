@@ -25,6 +25,7 @@ from helpers import (
 
 from lamplighter import compare
 from lamplighter.engine import Engine, presence_is_on, presence_reading
+from lamplighter.history import History, ZoneHistory
 from lamplighter.reconcile import COMMAND_RECHECK_SECONDS
 from lamplighter.zone import ZoneState
 
@@ -57,7 +58,7 @@ class Clock:
         return self.now
 
 
-def build(commander=None, clock=None, **zone_fields):
+def build(commander=None, clock=None, history=None, **zone_fields):
     """A one-zone engine: two lights, one presence device, one lux sensor."""
     zone_fields.setdefault("name", "Kitchen")
     zone_fields.setdefault("lights", [201, 202])
@@ -79,6 +80,7 @@ def build(commander=None, clock=None, **zone_fields):
         logger=LOG,
         clock=clock,
         on_zone_changed=changed.append,
+        history=history,
     )
     return engine, engine.zones[zone_fields["name"]], clock, changed
 
@@ -1290,3 +1292,428 @@ def test_the_wake_cause_uses_the_period_hold():
     assert [t.cause for t in summary.transitions] == ["presence hold expired"], (
         "the wake at the period hold's expiry was named by the zone-level hold"
     )
+
+
+# --------------------------------------------------------- history wiring
+
+
+def test_a_presence_device_edge_produces_exactly_one_history_event():
+    """Kills: not wiring `_presence_changed` to History at all, and kills
+    wiring it twice (a burst producing two events for one edge)."""
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(history=history)
+    make_device(101, "relay", onState=False)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+
+    events = history.zones[zone.name].events
+    assert [e["k"] for e in events] == ["presence"]
+    assert events[0] == {"t": "2026-09-04T19:00:00", "k": "presence", "id": 101, "kind": "device", "on": True}
+
+
+def test_a_light_report_produces_exactly_one_history_event():
+    """Kills: recording the desired level instead of what the light actually
+    reported, and kills recording on every callback regardless of whether
+    anything changed."""
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(history=history)
+
+    engine.device_updated(*light(201, before=0, after=60), clock.now)
+
+    events = [e for e in history.zones[zone.name].events if e["k"] == "light"]
+    assert len(events) == 1
+    assert events[0] == {"t": "2026-09-04T19:00:00", "k": "light", "id": 201, "level": 60}
+
+    # A second callback that changes nothing about what 201 reports (still
+    # 60) must not produce a second event -- `light_reported` gates on
+    # whether the states dict actually moved, and `append_light`'s own
+    # per-device dedupe is a second, independent gate behind it.
+    engine.device_updated(*light(201, before=60, after=60), clock.at(seconds=1))
+    events = [e for e in history.zones[zone.name].events if e["k"] == "light"]
+    assert len(events) == 1
+
+
+def test_a_transition_produces_exactly_one_state_history_event():
+    """Kills: recording a state event on every evaluation rather than only
+    on an actual transition, and kills swapping `to`/`from`."""
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(history=history)
+    make_device(101, "relay", onState=False)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+
+    events = [e for e in history.zones[zone.name].events if e["k"] == "state"]
+    assert len(events) == 1
+    assert events[0]["to"] == "occupied"
+    assert events[0]["from"] == "off_duty", "a zone's state starts OFF_DUTY until its first evaluation"
+
+
+def test_a_command_produces_exactly_one_write_history_event_per_device():
+    """Kills: recording the reconciler's log line and not the command
+    itself, and kills recording once per pass rather than once per device."""
+    history = History(logger=LOG)
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, _changed = build(commander, history=history)
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+
+    writes = [e for e in history.zones[zone.name].events if e["k"] == "write"]
+    assert sorted((w["id"], w["level"]) for w in writes) == [(201, 60), (202, 30)]
+
+
+def test_an_override_start_and_end_are_both_recorded():
+    """Kills: recording only the start, or attributing the end event to the
+    wrong device (the override is already cleared by the time the ending
+    transition is built -- see Engine._override_device)."""
+    history = History(logger=LOG)
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, _changed = build(commander, history=history)
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    # Occupy the zone first, so it has actually commanded 201 to 60 and the
+    # echo book knows about it -- otherwise the change below is the zone's
+    # own first write landing, not a person overriding it.
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+
+    now = clock.at(seconds=5)
+    apply_level(make_device(201, "dimmer", brightness=5), 5)
+    engine.device_updated(*light(201, 60, 5), now)
+    engine.tick(now)
+
+    overrides = [e for e in history.zones[zone.name].events if e["k"] == "override"]
+    assert len(overrides) == 1
+    assert overrides[0]["phase"] == "start"
+    assert overrides[0]["device"] == 201
+
+    engine.reset_override(zone.name, clock.at(seconds=10))
+    engine.tick(clock.at(seconds=10))
+
+    overrides = [e for e in history.zones[zone.name].events if e["k"] == "override"]
+    assert [o["phase"] for o in overrides] == ["start", "end"]
+    assert overrides[1]["device"] == 201
+
+
+def test_landing_off_duty_bright_records_an_offduty_event():
+    """Kills: never wiring the `offduty` kind at all, and kills firing it for
+    every off-duty cause rather than naming the real one."""
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(history=history)
+    make_device(101, "relay", onState=False)
+    make_device(302, "sensor", sensorValue=1200)
+
+    # Land on VACANT first (dark, empty), via the ordinary startup seeding
+    # path -- a zone's very first-ever lux reading is deliberately not a
+    # "flip" (Lux.dark: `previous is not None`), so getting to a real
+    # OFF_DUTY transition needs a SECOND reading, once the zone already has
+    # a verdict to flip away from.
+    engine.mark_all_dirty("startup")
+    engine.tick(clock.now)
+    assert zone.state is ZoneState.VACANT, "precondition: dark and empty"
+
+    now = clock.at(seconds=5)
+    engine.device_updated(*lux(302, before=1200, after=50000), now)
+    engine.tick(now)
+
+    offduty = [e for e in history.zones[zone.name].events if e["k"] == "offduty"]
+    assert len(offduty) == 1
+    assert offduty[0]["cause"] == "bright"
+
+
+def test_seeding_an_occupied_zone_records_presence_and_light_events():
+    """Kills: seeding rebuilding presence and reading lights without telling
+    History, which would leave the timeline blank across a restart even
+    though the room was genuinely occupied and the lights genuinely on."""
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(history=history)
+    make_device(101, "relay", onState=True)
+    make_device(201, "dimmer", brightness=60)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.seed_inputs(clock.now)
+
+    events = history.zones[zone.name].events
+    assert {"k": "presence", "id": 101, "kind": "device", "on": True} in [
+        {k: v for k, v in e.items() if k != "t"} for e in events
+    ]
+    assert {"k": "light", "id": 201, "level": 60} in [
+        {k: v for k, v in e.items() if k != "t"} for e in events
+    ]
+
+
+def test_a_relay_light_turning_on_is_recorded_at_100_and_off_at_0():
+    """Kills: `light_level`'s bool branch (relay polarity) inverted or
+    dropped, which would either record a relay backwards or, via an
+    unguarded `int(bool)`, happen to still pass -- this pins the actual
+    100/0 values, not just "some level got recorded"."""
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(
+        history=history, lights=[201],
+        periods=[make_period("Evening", "18:00", "23:00", levels={"201": 60})],
+    )
+    make_device(201, "relay", onState=False)
+
+    engine.device_updated(
+        make_snapshot(201, device_cls="relay", onState=False, name="Kitchen Relay"),
+        make_snapshot(201, device_cls="relay", onState=True, name="Kitchen Relay"),
+        clock.now,
+    )
+    engine.device_updated(
+        make_snapshot(201, device_cls="relay", onState=True, name="Kitchen Relay"),
+        make_snapshot(201, device_cls="relay", onState=False, name="Kitchen Relay"),
+        clock.at(seconds=1),
+    )
+
+    levels = [e["level"] for e in history.zones[zone.name].events if e["k"] == "light"]
+    assert levels == [100, 0]
+
+
+def test_a_light_that_cannot_be_read_contributes_no_history_point():
+    """Kills: `light_level`'s `UnreadableDevice` guard removed, which would
+    either raise out of `_light_changed` (taking the override rule down with
+    it, R1) or record a guessed level for a light this update cannot
+    actually read."""
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(
+        history=history, lights=[201],
+        periods=[make_period("Evening", "18:00", "23:00", levels={"201": 60})],
+    )
+    make_device(201, "dimmer", brightness=None)
+
+    engine.device_updated(
+        make_snapshot(201, brightness=0, name="Kitchen Pendants"),
+        make_snapshot(201, brightness=None, name="Kitchen Pendants"),
+        clock.now,
+    )
+
+    assert [e for e in history.zones.get(zone.name, ZoneHistory()).events if e["k"] == "light"] == []
+
+
+def test_a_presence_variable_edge_is_recorded_with_kind_variable():
+    """Kills: `_presence_variable_changed` recording with `kind="device"`
+    (copy-pasted from the device path) instead of `"variable"` -- the
+    timeline's presence lane needs to tell the two apart, and this pins the
+    exact event shape, not just that something got recorded."""
+    import indigo
+
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(presence_variables=[SIMON_HOME], history=history)
+    indigo.variables[SIMON_HOME] = indigo.Variable(SIMON_HOME, "SimonHome", "true")
+
+    engine.variable_updated(SIMON_HOME, clock.now)
+
+    assert history.zones[zone.name].events == [
+        {"t": "2026-09-04T19:00:00", "k": "presence", "id": SIMON_HOME, "kind": "variable", "on": True}
+    ]
+
+
+def test_every_command_the_reconciler_sends_is_recorded_including_wall_clock_retries():
+    """Kills: recording a command only on the callback-thread path and
+    missing the periodic wall-clock reconcile passes (or a retry ladder's
+    repeated commands) -- the timeline would then under-report exactly the
+    activity a stuck device generates the most of."""
+    history = History(logger=LOG)
+    commander = RecordingCommander(apply=False)  # 201 never lands on its own
+    engine, zone, clock, _changed = build(
+        commander, history=history, lights=[201], hold_seconds=1200,
+        periods=[make_period("Evening", "18:00", "23:00", levels={"201": 60})],
+    )
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    sent = len(engine.tick(clock.now).commands)
+    for number in range(1, 40):
+        sent += len(engine.tick(clock.at(seconds=60 * number)).commands)
+
+    assert engine.reconciler.is_parked(201), "precondition: the wall-clock retry path was exercised"
+    writes = [e for e in history.zones[zone.name].events if e["k"] == "write"]
+    assert len(writes) == sent
+    assert sent > 6, "precondition: more than the initial callback-thread command landed"
+
+
+def test_seeding_a_presence_variable_that_is_true_records_a_variable_presence_event():
+    """Kills: `_seed_zone`'s variable-seeding branch never telling History
+    at all -- a room whose only presence input is a variable would restart
+    with a blank presence lane even though it was genuinely occupied."""
+    import indigo
+
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(presence_variables=[SIMON_HOME], history=history)
+    indigo.variables[SIMON_HOME] = indigo.Variable(SIMON_HOME, "SimonHome", "true")
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.seed_inputs(clock.now)
+
+    stripped = [{k: v for k, v in e.items() if k != "t"} for e in history.zones[zone.name].events]
+    assert {"k": "presence", "id": SIMON_HOME, "kind": "variable", "on": True} in stripped
+
+
+def test_seeding_a_light_that_is_gone_records_nothing_for_it():
+    """Kills: `_seed_zone`'s light-seeding loop swallowing `DeviceGone` and
+    still recording SOME level (e.g. a stale/default one) for a light that
+    is not actually there to read."""
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(history=history)
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=60)  # 202 deliberately absent
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.seed_inputs(clock.now)
+
+    ids = [e["id"] for e in history.zones[zone.name].events if e["k"] == "light"]
+    assert ids == [201]
+
+
+def test_an_engine_with_no_history_sink_never_touches_it():
+    """Kills: `Engine` assuming `self.history` is always set -- the default
+    of None must be a genuine no-op, not an AttributeError waiting to
+    happen the first time a promise test builds an engine without one."""
+    engine, zone, clock, _changed = build(history=None)
+    make_device(101, "relay", onState=False)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)  # must not raise
+    assert engine.history is None
+
+
+class RaisingHistory:
+    """A `History` stand-in whose every `record_*` call raises. Used to pin
+    that a recording failure can never reach the caller -- see
+    `Engine._record` -- rather than merely asserting the method exists."""
+
+    def record_state(self, *a, **k):
+        raise RuntimeError("boom: record_state")
+
+    def record_presence(self, *a, **k):
+        raise RuntimeError("boom: record_presence")
+
+    def record_light(self, *a, **k):
+        raise RuntimeError("boom: record_light")
+
+    def record_write(self, *a, **k):
+        raise RuntimeError("boom: record_write")
+
+    def record_override(self, *a, **k):
+        raise RuntimeError("boom: record_override")
+
+    def record_offduty(self, *a, **k):
+        raise RuntimeError("boom: record_offduty")
+
+    def forget(self, *a, **k):
+        raise RuntimeError("boom: forget")
+
+
+def test_a_light_recording_failure_cannot_skip_the_override_rule():
+    """Kills: recording a light's report before the override rule runs
+    (R1) -- if `history.record_light` raised there and the raise escaped,
+    it would take the whole `device_updated` callback down before
+    `is_manual_override` ever ran, silently disabling override detection
+    for that event and every one after it on the same callback."""
+    history = RaisingHistory()
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, _changed = build(commander, history=history)
+    make_device(101, "relay", onState=False)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+    assert zone.state is ZoneState.OCCUPIED, "precondition: the zone has a desired level to move off"
+
+    now = clock.at(seconds=5)
+    apply_level(make_device(201, "dimmer", brightness=5), 5)
+    # Must not raise, and the override must still be detected even though
+    # `history.record_light` (called first, for whatever the light actually
+    # reports) raises on every call.
+    edges = engine.device_updated(*light(201, 60, 5), now)
+    assert any(e.kind == "override" for e in edges)
+
+
+def test_a_recording_failure_in_run_zone_does_not_block_the_command_or_notify():
+    """Kills: letting a raise from `_record_transition`/`_record_commands`
+    stop `_run_zone` from extending `commands`, recording the command sent,
+    or notifying -- a history bug must never be able to leave a zone's
+    Indigo device states or persisted state behind."""
+    history = RaisingHistory()
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, changed = build(commander, history=history)
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    summary = engine.tick(clock.now)  # must not raise
+
+    assert summary.transitions, "the transition was still built and published"
+    assert summary.commands, "the commands were still sent despite the recording failure"
+    assert zone in changed, "the zone-changed callback still ran"
+
+
+def test_a_reload_that_removes_a_zone_forgets_its_history():
+    """Kills: leaving a departed zone's history in the store forever -- see
+    `test_a_reload_that_removes_a_zone_forgets_its_timers_and_its_backoff`
+    for the same property pinned for timers and backoff."""
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(history=history)
+    make_device(101, "relay", onState=False)
+    make_device(302, "sensor", sensorValue=1200)
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+    assert "Kitchen" in history.zones
+
+    replacement = make_config(
+        [
+            make_zone_document(
+                name="Study",
+                lights=[203],
+                periods=[make_period("Evening", "18:00", "23:00", levels={"203": 60})],
+            )
+        ],
+        sun=engine.sun,
+    )
+    engine.reload(replacement, clock.at(seconds=5))
+
+    assert "Kitchen" not in history.zones
+
+
+def test_a_reload_that_removes_a_zone_survives_a_history_forget_failure():
+    """Kills: letting `History.forget` raising stop the reload from removing
+    the zone from `engine.zones` or from its other per-device bookkeeping."""
+    history = RaisingHistory()
+    engine, zone, clock, _changed = build(history=history)
+    make_device(101, "relay", onState=False)
+    make_device(302, "sensor", sensorValue=1200)
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+
+    replacement = make_config(
+        [
+            make_zone_document(
+                name="Study",
+                lights=[203],
+                periods=[make_period("Evening", "18:00", "23:00", levels={"203": 60})],
+            )
+        ],
+        sun=engine.sun,
+    )
+    engine.reload(replacement, clock.at(seconds=5))  # must not raise
+
+    assert set(engine.zones) == {"Study"}

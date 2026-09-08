@@ -238,6 +238,16 @@
                 <TriggerLabel>Configured Zone Count</TriggerLabel>
                 <ControlPageLabel>Configured Zone Count</ControlPageLabel>
             </State>
+
+            <!-- The status page's timeline data file (PRD section 12):
+                 "ok", or the reason it could not be written. Independent of
+                 config_status: this file is data the plugin generates on
+                 its own schedule, not the configuration it is running. -->
+            <State id="history_status">
+                <ValueType>String</ValueType>
+                <TriggerLabel>History Status</TriggerLabel>
+                <ControlPageLabel>History Status</ControlPageLabel>
+            </State>
         </States>
     </Device>
 </Devices>

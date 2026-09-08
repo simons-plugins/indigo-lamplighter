@@ -1019,7 +1019,7 @@ class Zone:
     def _periods_today_json(self, now: dt.datetime) -> str:
         """This zone's periods resolved to today's clock times, as JSON.
 
-        The status page's day strip (2026.4.0) needs sunset/sunrise-relative
+        The status page's timeline's periods lane (2026.5.0) needs sunset/sunrise-relative
         periods at the time they actually land *today*, not the offset
         expression a person would have to do the sun math on themselves --
         the whole reason ``periods.period_window`` exists (section 5.5). A
