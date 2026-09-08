@@ -1,22 +1,68 @@
 # Lamplighter
 
-Presence- and daylight-driven lighting for [Indigo](https://www.indigodomo.com),
-built around one idea: every decision comes from the zone's inputs (when
-presence was last seen, how bright the room is, which period it is, whether a
-person has taken over), never from diffing live device state.
+Presence- and daylight-driven lighting for [Indigo](https://www.indigodomo.com).
 
-Successor to the `indigo-auto-lights` fork. Design: [`docs/plans/PRD-indigo-lamplighter.md`](docs/plans/PRD-indigo-lamplighter.md).
+Lamplighter runs your lights in **zones**. Each zone watches a few presence
+inputs (PIRs, radar, door contacts, an Indigo variable), optionally a lux
+sensor, and a set of lights. It decides what the lights should be doing from
+those inputs and the time of day, and it notices when a person has taken over
+a room and backs off until they are done. Every decision comes from the
+zone's inputs, never from diffing live device state, so a light that reports
+late or a group that reads back a few points low cannot make it change its
+mind.
 
-Status: M2 live on the Hallway zone on jarvis (2026-09-05); M3 (converter
-done, MCP tools in progress).
+![Lamplighter status page](docs/images/lamplighter-status-page.png)
+
+Status: **live** since 2026-09-06, running eight zones on the author's house.
+Current release: see the [releases page](https://github.com/simons-plugins/indigo-lamplighter/releases).
+Successor to the `indigo-auto-lights` fork; the design and its evidence are in
+[`docs/plans/PRD-indigo-lamplighter.md`](docs/plans/PRD-indigo-lamplighter.md).
+
+## How a zone decides
+
+A zone is always in one of four states:
+
+| State | Meaning | What the lights are told |
+|-------|---------|--------------------------|
+| **Occupied** | presence seen within the hold time, and the room is dark | the active period's level for each light |
+| **Vacant** | the presence hold has expired | off (or the period's `vacant_levels`, if set) |
+| **Overridden** | somebody changed a light by hand | nothing: whatever the lights are now |
+| **Off duty** | no period covers now, or the room is bright, or the zone is disabled | bright: off; otherwise left alone |
+
+Three ideas do most of the work:
+
+- **Presence hold.** A zone stays occupied for `hold_seconds` after the last
+  presence input went off, so a PIR with a ten-second hardware hold behaves
+  like a proper occupancy sensor. The hold can differ per period, so a
+  kitchen can hold for an hour in the working day and fifteen minutes late at
+  night.
+- **Dark with hysteresis.** A zone with a lux sensor is dark below
+  `dark_below` and only becomes bright again once the reading climbs
+  `hysteresis` above it, so the zone's own lights cannot flip it back and
+  forth. A zone with `"lux": null` follows presence around the clock.
+- **Manual override.** If a light in the zone changes to something the zone
+  did not ask for, a person did it. The zone locks: it stops writing for
+  `duration_minutes`, extends by `extend_minutes` while the room stays
+  occupied, and (with `unlock_on_leave`) releases as soon as the room
+  empties. A zone can also be told never to lock, which suits a hallway light
+  on a wall switch.
+
+Every zone writes a one-line explanation of its current decision to its
+`explain` state and to the event log on each transition, for example:
+
+```
+Back Garden is overridden because device 1445308831 took it over at 07:42:40,
+held until 08:42:40. period=Day; presence=active (hold, last seen 08:17:26);
+lux=54 STALE, read 48 min ago, dark below 100; override=1445308831.
+Last trigger: presence: msqKitchenPIR.
+```
 
 ## Install
 
 **First install: double-click `Lamplighter.indigoPlugin` on the Indigo
 server.** Indigo has to register the bundle itself; copying the folder into
 `Plugins/` works only for *later* updates to a bundle it has already
-installed, and a copied first install shows up as a plugin that will not
-start.
+installed.
 
 Updating an installed plugin: copy the changed files into
 
@@ -24,19 +70,18 @@ Updating an installed plugin: copy the changed files into
 /Library/Application Support/Perceptive Automation/Indigo 2025.2/Plugins/Lamplighter.indigoPlugin/Contents/Server Plugin/
 ```
 
-and reload the plugin (Plugins → Lamplighter → Reload). Adding or changing a
-device *state* needs a plugin restart, not just a reload, because the state
-list is refreshed in `deviceStartComm`.
+and reload the plugin (Plugins → Lamplighter → Reload). A release that adds a
+device *state* needs a plugin restart rather than a reload.
 
 On first start the plugin creates:
 
-- one **Lamplighter Zone** device per zone in the configuration — its on/off
-  is that zone's enable, and its states carry everything in PRD section 5.10
-  (`state`, `presence_active`, `lux`, `dark`, `period`, `explain`, the day's
-  counters, and the persisted override);
-- one **Lamplighter Controller** device — its on/off is the global enable, so
-  "all automation off" is one switch, and it carries the zone counts, the
-  summed counters and the configuration status.
+- one **Lamplighter Zone** device per zone in the configuration. Its on/off
+  is that zone's enable, and its states carry the zone's decision (`state`,
+  `explain`, `period`, `presence_active`, `lux`, `dark`, the override, the
+  desired level per light, today's counters);
+- one **Lamplighter Controller** device. Its on/off is the global enable, so
+  "all automation off" is one switch. It carries zone counts, summed
+  counters and the configuration status.
 
 A zone that later disappears from the configuration keeps its device: nothing
 is ever deleted for you. The device says so in its `explain` state and the
@@ -58,37 +103,141 @@ which on a stock 2025.2 server is
 
 The plugin writes `{"version": 1, "zones": []}` there if the file is missing,
 watches its modification time, and reloads within five seconds of a save.
-Overrides, presence and the dark verdict survive the reload (a zone switched
-off in the new file does *not* survive — the file is what `enabled` means).
-**A file that does not validate is refused whole**: the error names the
-failing path, is logged once per edit, appears on the controller device's
-`config_status` state, and the previous configuration keeps running.
+Overrides, presence and the dark verdict survive a reload. **A file that does
+not validate is refused whole**: the error names the failing path, is logged
+once per edit, appears on the controller device's `config_status` state, and
+the previous configuration keeps running.
 
-See [`examples/lamplighter.example.json`](examples/lamplighter.example.json)
-for a worked file and
-`Lamplighter.indigoPlugin/Contents/Server Plugin/lamplighter/schema.json`
-for the schema.
+A zone looks like this (see
+[`examples/lamplighter.example.json`](examples/lamplighter.example.json) for
+a complete file):
+
+```json
+{
+  "name": "Kitchen",
+  "enabled": true,
+  "presence_devices": [1465867145, 735515977],
+  "presence_variables": [],
+  "hold_seconds": 300,
+  "lux": { "device": 1616814762, "dark_below": 2200, "hysteresis": 300 },
+  "lights": [772478931, 1256902388, 1990903005],
+  "override": { "enabled": true, "duration_minutes": 60, "extend_minutes": 30, "unlock_on_leave": true },
+  "periods": [
+    { "name": "Day",  "from": "06:00",       "to": "sunset-30m", "mode": "on_and_off",
+      "levels": { "772478931": "on", "1256902388": 100, "1990903005": 100 } },
+    { "name": "Dusk", "from": "sunset-30m",  "to": "22:00",      "mode": "on_and_off",
+      "levels": { "772478931": 50, "1256902388": 60, "1990903005": 60 },
+      "vacant_levels": { "1990903005": 10 } },
+    { "name": "Night", "from": "22:00",      "to": "06:00",      "mode": "on_and_off", "limit": 50,
+      "levels": { "1990903005": 30 } }
+  ]
+}
+```
+
+The pieces:
+
+- **`presence_devices`** are any Indigo devices with an on/off state,
+  combined any-of. **`presence_variables`** are Indigo variables that count
+  as presence when their value is `true`, `on`, `yes`, `1` or `home`, which
+  is how a phone-at-home variable can hold a bedroom.
+- **`lux`** is the daylight gate, or `null` for none. `dark_below_variable_id`
+  lets an Indigo variable override the threshold, so it can be tuned from a
+  control page. `when_unreadable` says what the zone believes when the
+  sensor cannot be read (default `dark`, so an indoor room does not go dark
+  because a sensor died).
+- **`lights`** is every light the zone may command. A light not listed here
+  is never written and can never create an override.
+- **`periods`** are the zone's day, as non-overlapping bands. `from` and `to`
+  are `HH:MM` or sunrise/sunset-relative (`sunset-1h30m`, `sunrise+20m`); a
+  band whose `to` is earlier than its `from` crosses midnight. Gaps mean
+  off duty: no writes. `mode` is `on_and_off` or `off_only` (never turns a
+  light on, only off, for a hard-off band). `levels` gives each light an
+  integer 1–100, `"on"`, `"off"` or `"leave"`; a light absent from `levels`
+  is left alone in that period. `vacant_levels` dims instead of switching
+  off when the room empties. `limit` caps every level in the band.
+  `adjust_by_lux` scales lights without an explicit integer level by how
+  dark the room is. A period may carry its own `hold_seconds` and its own
+  `override` timing, replacing the zone's while it is active.
+- **`override`** sets the manual-override behaviour described above.
+  `exclude` names lights that can never *create* an override (a slow
+  reporter, a group that reads back low) while still being commanded.
+
+The schema is at
+`Lamplighter.indigoPlugin/Contents/Server Plugin/lamplighter/schema.json`, and
+every rule in it is also enforced by the loader with a path-precise error.
+
+### Migrating from Auto Lights
+
+`tools/convert_autolights_config.py` turns an `auto_lights_conf.json` into a
+Lamplighter file, one zone at a time, so the two plugins can run side by side
+while you move zones across. Never leave both plugins pointed at the same
+lights: each will see the other's writes as manual overrides.
 
 ## Status page
 
-The plugin bundles a read-only status page showing every zone's state, why
-it holds that state, its current period, lux verdict, presence, any manual
-override (with its expiry), the level it wants for each light, and today's
-counters, plus a header from the controller device: enabled/disabled, zone
-counts, config status and today's totals. It is copied into Indigo's Web
-Assets on startup (and on
-every prefs save with **"Manage the status page"** ticked), the same way
-[indigo-unifi-protect](https://github.com/simons-plugins/indigo-unifi-protect)
-manages its Cameras page, and served at:
+The plugin bundles a read-only status page: one card per zone with its state,
+a plain-English verdict, the period, lux and presence facts, any manual
+override with its owner and expiry, a strip of today's periods with a "now"
+marker, every light with the level the zone wants next to what the light is
+actually doing, the presence inputs and which one fired last, and the raw
+engine reasoning behind a disclosure. The header shows the controller's
+enable, zone counts, configuration status and today's totals.
+
+![A zone card with its lights open](docs/images/lamplighter-status-page-lights-open.png)
+
+The page is copied into Indigo's Web Assets on startup, and on every prefs
+save with **"Manage the status page"** ticked, and served at:
 
 ```
 https://<indigo-host>:8176/static/pages/lamplighter.html?api-key=<your-key>
 ```
 
-The `?api-key=` form is how the page authenticates outside the dom.io app.
-Untick **"Manage the status page"** in the plugin's configuration if you
-hand-edit the installed copy — otherwise your changes are overwritten on the
+The `?api-key=` form is how the page authenticates outside the dom.io app,
+which discovers it automatically. Untick **"Manage the status page"** if you
+hand-edit the installed copy; otherwise your changes are overwritten on the
 next start or config save.
+
+## Actions and menu
+
+Actions, for triggers, schedules and action groups:
+
+| Action | What it does |
+|--------|--------------|
+| **Reset Override** | releases a zone's lock, or every zone's |
+| **Lock Zone** | creates an override without touching a light: holds the zone at whatever its lights are now, for the period's override duration |
+| **Set Zone Enabled** | turns a zone on or off until the next configuration reload |
+| **Reconcile Now** | re-checks every enabled zone immediately |
+| **Explain Zone** | logs one zone's reasoning; give a local time (`YYYY-MM-DDTHH:MM`) to dry-run the zone at that moment instead, with nothing written |
+
+Plugin menu: **Print zone states**, **Explain all zones**, **Reload
+configuration now**.
+
+Turning a zone device off disables that zone; turning the controller device
+off stops every zone writing.
+
+## Claude and other assistants
+
+[indigo-mcp-lite](https://github.com/simons-plugins/indigo-mcp-lite) carries a
+set of `lamplighter_*` MCP tools: list zones, get a zone's configuration and
+live state, update a zone (a JSON-merge patch, validated by this plugin's own
+loader before it is written and reloaded), reset an override, lock a zone,
+set enabled, reconcile, and explain or dry-run a zone. They let an assistant
+tune a zone from a conversation and read the plugin's reasoning without
+opening the event log.
+
+## Reading the event log
+
+- `Kitchen: vacant -> occupied (presence: msqKitchenPIR); ...` — a transition,
+  with the input edge that caused it and the values that fed the decision.
+- `Back Garden: override taken by device 1445308831 at 07:42:40, holding 60 min ...`
+  — a light changed to something the zone did not command. Find what changed
+  it (a wall switch, a scene, another plugin) if you did not expect a lock.
+- `Dining Room: DiningRoom - Shelves (1431420103) did not reach its desired level ...`
+  — the zone commanded a light and it did not land. The zone retries on a
+  backoff and then every ten minutes; the light, not the plugin, is what to
+  look at.
+- `lux=291 STALE, read 36 min ago` in an explain line — the lux sensor has not
+  reported for a while. The zone keeps its last verdict.
 
 ## Development
 
@@ -98,35 +247,15 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-Everything passes and nothing is `xfailed`: the promises below were written
-first as strict `xfail` stubs and have all since been replaced by real tests.
+The suite runs against a fake `indigo` module (`tests/conftest.py`). Every
+promise in PRD section 7 has one test, named for the wrong implementation it
+would catch, and each was verified by applying that mutation and watching
+the test fail. `xfail_strict = true` in `pyproject.toml` remains: a
+placeholder that starts passing fails the suite.
 
-### The acceptance suite was written before the engine, and it is strict
+`tests/test_schema.py` validates the bundled schema against the JSON Schema
+2020-12 metaschema, validates the example file, and checks that a table of
+invalid documents fails at the path a config author would need to see.
 
-`tests/test_promises_*.py` holds one stub per promise in PRD section 7, each
-marked:
-
-```python
-@pytest.mark.xfail(strict=True, reason="M1: engine not built", raises=NotImplementedError)
-```
-
-Every docstring states the promise in one sentence and then names **the
-mutation it must kill** — the plausible wrong implementation that a happy-path
-test would not catch. Attempt 1 at the override rule (fork issue #15) passed a
-happy-path suite and shipped a bug, which is why the promises are written this
-way and why they are written first.
-
-`xfail_strict = true` (in `pyproject.toml`) means a stub that *starts passing*
-**fails the suite**. That is deliberate: M1 lands one promise at a time, each
-by replacing a stub body with the real test and then applying the named
-mutation to confirm the test actually fails under it. A stub can never be
-satisfied by accident, and the run's `xfailed` count is the honest measure of
-how much of the PRD is still unbuilt.
-
-`tests/test_schema.py` is not a stub: it validates the bundled schema against
-the JSON Schema 2020-12 metaschema, validates
-`examples/lamplighter.example.json` against the schema, checks that a table of
-invalid documents fails at the path a config author would need to see, and
-pins the PRD section 11 decisions that are visible in the schema's shape.
-
-Schema: `Lamplighter.indigoPlugin/Contents/Server Plugin/lamplighter/schema.json`.
+Pull requests need a `PluginVersion` bump in `Info.plist` (patch for fixes,
+minor for user-visible changes); a merge to `main` publishes a release.
