@@ -73,6 +73,14 @@ HISTORY_FILENAME = "lamplighter-history.json"
 #: costs nothing between writes either way.
 HISTORY_WRITE_INTERVAL_SECONDS = 30.0
 
+#: How long a quiet house may go without the file being rewritten. Nothing
+#: new to record is the normal state of an evening, and a file that has not
+#: moved is then indistinguishable, to the page, from a plugin that has
+#: stopped writing. So the timestamp is refreshed at least this often; the
+#: page treats a file older than a couple of these as the plugin having
+#: stopped, and only then says so.
+HISTORY_HEARTBEAT_SECONDS = 600.0
+
 #: What a fresh install gets written for it. It is deliberately a document the
 #: loader *refuses* -- ``zones`` may not be empty in a configured file -- so
 #: the "no zones yet" case is recognised here by shape rather than by reading
@@ -1259,13 +1267,14 @@ class Plugin(indigo.PluginBase):
         regardless -- a filesystem problem must not stop the plugin deciding
         anything about a light.
         """
-        if not force and not self.history.dirty:
+        since_last = (
+            None if self._history_last_write is None
+            else (now - self._history_last_write).total_seconds()
+        )
+        heartbeat_due = since_last is not None and since_last >= HISTORY_HEARTBEAT_SECONDS
+        if not force and not self.history.dirty and not heartbeat_due:
             return
-        if (
-            not force
-            and self._history_last_write is not None
-            and (now - self._history_last_write).total_seconds() < HISTORY_WRITE_INTERVAL_SECONDS
-        ):
+        if not force and not heartbeat_due and since_last is not None and since_last < HISTORY_WRITE_INTERVAL_SECONDS:
             return
 
         try:

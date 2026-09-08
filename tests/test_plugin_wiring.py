@@ -1699,16 +1699,32 @@ def test_a_worker_pass_writes_history_no_more_often_than_the_interval(install):
     assert the_plugin._history_last_write == later
 
 
-def test_a_quiet_pass_writes_nothing_at_all(install):
+def test_a_quiet_pass_inside_the_heartbeat_writes_nothing_at_all(install):
     """Kills: writing unconditionally every interval even with nothing new
-    recorded -- a quiet house at 3 a.m. should cost zero filesystem writes."""
+    recorded -- a quiet house at 3 a.m. should cost one write per heartbeat,
+    not one per interval."""
     the_plugin = started(a_document())
-    the_plugin._history_last_write = None
+    now = dt.datetime.now()
+    the_plugin._history_last_write = now - dt.timedelta(seconds=plugin_module.HISTORY_HEARTBEAT_SECONDS / 2)
     the_plugin.history.dirty = False
 
-    the_plugin._write_history(dt.datetime.now())
+    the_plugin._write_history(now)
 
-    assert the_plugin._history_last_write is None
+    assert the_plugin._history_last_write < now
+
+
+def test_a_quiet_house_still_gets_a_heartbeat_write(install):
+    """Kills: gating the write on `dirty` alone. With nothing recorded for an
+    evening the file's generated_at would freeze, and the page could not tell
+    a quiet house from a plugin that had stopped writing."""
+    the_plugin = started(a_document())
+    now = dt.datetime.now()
+    the_plugin._history_last_write = now - dt.timedelta(seconds=plugin_module.HISTORY_HEARTBEAT_SECONDS + 1)
+    the_plugin.history.dirty = False
+
+    the_plugin._write_history(now)
+
+    assert the_plugin._history_last_write == now
 
 
 def test_shutdown_flushes_history_even_inside_the_interval(install):

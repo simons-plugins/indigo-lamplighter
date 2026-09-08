@@ -1275,10 +1275,13 @@ function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone, histo
   }
   if (historyGeneratedAt) {
     const genMs = new Date(historyGeneratedAt).getTime();
-    if (!isNaN(genMs) && (now.getTime() - genMs) > 10 * 60 * 1000) {
+    // The plugin refreshes the file at least every 10 minutes even when
+    // nothing happened (its heartbeat), so a file older than 25 minutes
+    // means the plugin has stopped writing, not that the house is quiet.
+    if (!isNaN(genMs) && (now.getTime() - genMs) > 25 * 60 * 1000) {
       const note = document.createElement("div");
-      note.className = "tl-note";
-      note.textContent = "history last written " + fmtTime(historyGeneratedAt);
+      note.className = "tl-unavailable";
+      note.textContent = "history last written " + fmtTime(historyGeneratedAt) + " — the plugin has stopped writing it";
       wrap.appendChild(note);
     }
   }

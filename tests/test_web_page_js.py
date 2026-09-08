@@ -1255,9 +1255,9 @@ def test_buildtimeline_flags_a_stale_generated_at(tmp_path):
         _FAKE_DOM_STUB
         + _FIND_BY_CLASS
         + f"""
-        const stale = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+        const stale = new Date(Date.now() - 30 * 60 * 1000).toISOString();
         const wrap = buildTimeline({_ZONE_STATES}, [], null, [], "Kitchen", "ok", stale, false);
-        const notes = findByClass(wrap, "tl-note").map(e => e.textContent);
+        const notes = findByClass(wrap, "tl-unavailable").map(e => e.textContent);
         console.log(JSON.stringify({{ notes }}));
     """
     )
