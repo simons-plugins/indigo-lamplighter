@@ -70,8 +70,10 @@ Updating an installed plugin: copy the changed files into
 /Library/Application Support/Perceptive Automation/Indigo 2025.2/Plugins/Lamplighter.indigoPlugin/Contents/Server Plugin/
 ```
 
-and reload the plugin (Plugins → Lamplighter → Reload). A release that adds a
-device *state* needs a plugin restart rather than a reload.
+and reload the plugin (Plugins → Lamplighter → Reload). States added by a
+new release appear on your existing zone devices automatically; the first
+start after such an upgrade logs a few one-off `state key … not defined`
+errors before the state list refreshes, which is expected.
 
 On first start the plugin creates:
 
@@ -102,7 +104,8 @@ which on a stock 2025.2 server is
 ```
 
 The plugin writes `{"version": 1, "zones": []}` there if the file is missing,
-watches its modification time, and reloads within five seconds of a save.
+watches its modification time, and reloads within a couple of seconds of a
+save.
 Overrides, presence and the dark verdict survive a reload. **A file that does
 not validate is refused whole**: the error names the failing path, is logged
 once per edit, appears on the controller device's `config_status` state, and
@@ -155,9 +158,11 @@ The pieces:
   integer 1–100, `"on"`, `"off"` or `"leave"`; a light absent from `levels`
   is left alone in that period. `vacant_levels` dims instead of switching
   off when the room empties. `limit` caps every level in the band.
-  `adjust_by_lux` scales lights without an explicit integer level by how
-  dark the room is. A period may carry its own `hold_seconds` and its own
-  `override` timing, replacing the zone's while it is active.
+  `adjust_by_lux` is reserved and not implemented in this release: the
+  loader refuses it on a zone with a lux block, so set the levels you want
+  directly. A period may carry its own `hold_seconds` and its own
+  `override` timing (both `duration_minutes` and `extend_minutes` must be
+  given), replacing the zone's while it is active.
 - **`override`** sets the manual-override behaviour described above.
   `exclude` names lights that can never *create* an override (a slow
   reporter, a group that reads back low) while still being commanded.
@@ -169,9 +174,12 @@ every rule in it is also enforced by the loader with a path-precise error.
 ### Migrating from Auto Lights
 
 `tools/convert_autolights_config.py` turns an `auto_lights_conf.json` into a
-Lamplighter file, one zone at a time, so the two plugins can run side by side
-while you move zones across. Never leave both plugins pointed at the same
-lights: each will see the other's writes as manual overrides.
+Lamplighter file with every zone converted and `"enabled": false`, so you can
+enable zones one at a time while the two plugins run side by side. The fork
+file carries no presence devices, so give each zone its inputs with
+`--presence "Zone=id,id"` (and `--hold`, default 300 seconds) or the zone
+will not load. Never leave both plugins pointed at the same lights: each will
+see the other's writes as manual overrides.
 
 ## Status page
 
@@ -183,7 +191,7 @@ actually doing, the presence inputs and which one fired last, and the raw
 engine reasoning behind a disclosure. The header shows the controller's
 enable, zone counts, configuration status and today's totals.
 
-![A zone card with its lights open](docs/images/lamplighter-status-page-lights-open.png)
+![The status page on a phone](docs/images/lamplighter-status-page-phone.png)
 
 The page is copied into Indigo's Web Assets on startup, and on every prefs
 save with **"Manage the status page"** ticked, and served at:
