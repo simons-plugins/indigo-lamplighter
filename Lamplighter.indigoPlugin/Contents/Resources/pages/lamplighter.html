@@ -11,15 +11,15 @@
 :root{--bg:#f7f4ef;--card-bg:#fff;--text:#1d1a15;--text-secondary:#8a8378;--border:#e2dbcd;
 --accent:#c9822f;--on-color:#3a9d5c;--warn:#c9822f;--bad:#c1442c;--muted:#a39b8c;
 --chip-bg:#efe9dc;--shadow:0 1px 3px rgba(0,0,0,.08);--now-line:var(--accent);
---presence:#3b7dd8}
+--presence:#3b7dd8;--bright:rgba(242,201,76,.45)}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17140f;--card-bg:#241f18;
 --text:#f2ede2;--text-secondary:#a89f8f;--border:#3a342a;--accent:#e0a04b;--on-color:#4cb772;
 --warn:#e0a04b;--bad:#e0654a;--muted:#6f6858;--chip-bg:#2e281f;--shadow:0 1px 3px rgba(0,0,0,.4);
---now-line:var(--accent);--presence:#6aa5f0}}
+--now-line:var(--accent);--presence:#6aa5f0;--bright:rgba(242,201,76,.35)}}
 :root[data-theme="dark"]{--bg:#17140f;--card-bg:#241f18;--text:#f2ede2;--text-secondary:#a89f8f;
 --border:#3a342a;--accent:#e0a04b;--on-color:#4cb772;--warn:#e0a04b;--bad:#e0654a;--muted:#6f6858;
 --chip-bg:#2e281f;--shadow:0 1px 3px rgba(0,0,0,.4);
---now-line:var(--accent);--presence:#6aa5f0}
+--now-line:var(--accent);--presence:#6aa5f0;--bright:rgba(242,201,76,.35)}
 *{box-sizing:border-box}
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;
 background:var(--bg);color:var(--text);font-size:17px;-webkit-font-smoothing:antialiased;
@@ -97,6 +97,8 @@ display:flex;align-items:center;justify-content:center}
 .tl-mark.override{background:repeating-linear-gradient(45deg,var(--warn) 0,var(--warn) 3px,
 transparent 3px,transparent 7px);opacity:.6;border-radius:2px}
 .tl-mark.glyph{width:14px;margin-left:-7px;opacity:.9}
+.tl-mark.bright{background:var(--bright);border-radius:2px;justify-content:flex-start;padding-left:2px;
+color:var(--text-secondary)}
 
 .tl-now{position:absolute;top:0;bottom:0;width:2px;background:var(--now-line);z-index:3;
 box-shadow:0 0 0 2px var(--card-bg)}
@@ -121,6 +123,7 @@ margin-bottom:14px;align-items:center}
 .legend .lg-item{display:flex;align-items:center;gap:5px;white-space:nowrap}
 .legend .lg-swatch{width:12px;height:8px;border-radius:2px;flex:0 0 auto}
 .legend .lg-swatch.presence{background:var(--presence);opacity:.6}
+.legend .lg-swatch.bright{background:var(--bright)}
 .legend .lg-swatch.light{background:var(--accent);opacity:.7}
 .legend .lg-swatch.override{background:repeating-linear-gradient(45deg,var(--warn) 0,var(--warn) 2px,
 transparent 2px,transparent 5px)}
@@ -190,10 +193,10 @@ word-break:break-word;width:100%}
 
 <div class="hdr" id="hdr" hidden></div>
 <div class="legend" id="legend" hidden>
-  <span class="lg-item"><span class="lg-swatch presence"></span>Presence (thin ticks are motion edges)</span>
+  <span class="lg-item"><span class="lg-swatch presence"></span>Presence (thin ticks are presence-input edges)</span>
   <span class="lg-item"><span class="lg-swatch light"></span>Light (deeper = brighter; thin ticks are commanded writes)</span>
   <span class="lg-item"><span class="lg-swatch override"></span>Override</span>
-  <span class="lg-item">☀ Off duty (bright)</span>
+  <span class="lg-item"><span class="lg-swatch bright"></span>☀ Bright, so off duty (for as long as the bar runs)</span>
   <span class="lg-item" style="color:var(--bad)">⋯ History truncated</span>
   <span class="lg-item"><span class="lg-swatch now"></span>Now</span>
 </div>
@@ -640,6 +643,30 @@ function pctOfDay(date, dayStart) {
 // since history keeps 48h) -- a zone that has been occupied since 23:40
 // last night must show occupied from 00:00, not from whenever today's first
 // event happens to land.
+// Off duty because the room is bright is a STRETCH of time, not an instant:
+// it starts at the `offduty` event with cause "bright" and lasts until the
+// next `state` event of any kind (the zone came back, or went off duty for
+// a different reason). Drawn as a span so it is not mistaken for a one-off.
+// `[{start, end}]` in ms; `end` is null while the stretch is still running.
+function brightSpans(events) {
+  const timed = (events || [])
+    .filter(e => e && typeof e.t === "string")
+    .map(e => ({ e, ms: new Date(e.t).getTime() }))
+    .filter(x => !isNaN(x.ms))
+    .sort((a, b) => a.ms - b.ms);
+  const spans = [];
+  for (let i = 0; i < timed.length; i++) {
+    const { e, ms } = timed[i];
+    if (e.k !== "offduty" || e.cause !== "bright") continue;
+    let end = null;
+    for (let j = i + 1; j < timed.length; j++) {
+      if (timed[j].e.k === "state" && timed[j].ms > ms) { end = timed[j].ms; break; }
+    }
+    spans.push({ start: ms, end });
+  }
+  return spans;
+}
+
 function intervalsFromStates(events, dayStart, now) {
   const dayStartMs = dayStart.getTime();
   const nowMs = now.getTime();
@@ -1378,7 +1405,6 @@ function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone, histo
   }
   if (openOverride) overrideSpans.push({ start: openOverride.t, end: null, device: openOverride.device });
 
-  const offdutyBright = usableEvents.filter(e => e.k === "offduty" && e.cause === "bright");
   const gaps = usableEvents.filter(e => e.k === "gap");
 
   wrap.appendChild(
@@ -1404,14 +1430,19 @@ function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone, histo
         el.appendChild(glyph);
         track.appendChild(el);
       }
-      for (const ev of offdutyBright) {
-        const t = new Date(ev.t).getTime();
-        if (isNaN(t) || t < dayStartMs || t > nowMs) continue;
+      for (const span of brightSpans(usableEvents)) {
+        const endMs = span.end === null ? nowMs : span.end;
+        if (endMs < dayStartMs || span.start > nowMs) continue;
+        const clampedStart = Math.max(span.start, dayStartMs);
+        const clampedEnd = Math.min(endMs, nowMs);
         const el = document.createElement("div");
-        el.className = "tl-mark glyph";
-        el.style.left = pctOfDay(new Date(t), dayStart) + "%";
-        el.textContent = "☀";
-        el.title = `bright enough, off duty at ${fmtTime(ev.t)}`;
+        el.className = "tl-mark bright";
+        el.style.left = pctOfDay(new Date(clampedStart), dayStart) + "%";
+        el.style.width = Math.max(0.4, pctOfDay(new Date(clampedEnd), dayStart) - pctOfDay(new Date(clampedStart), dayStart)) + "%";
+        el.title = `bright, so off duty · ${fmtTime(new Date(span.start).toISOString())}–${span.end === null ? "now" : fmtTime(new Date(span.end).toISOString())}`;
+        const glyph = document.createElement("span");
+        glyph.textContent = "☀";
+        el.appendChild(glyph);
         track.appendChild(el);
       }
       for (const ev of gaps) {
