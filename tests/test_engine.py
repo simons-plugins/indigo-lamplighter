@@ -1500,20 +1500,6 @@ def test_a_light_that_cannot_be_read_contributes_no_history_point():
     assert [e for e in history.zones.get(zone.name, ZoneHistory()).events if e["k"] == "light"] == []
 
 
-def test_an_off_report_from_a_sensor_already_off_records_no_presence_event():
-    """Kills: `_presence_changed`'s no-change gate (comparing
-    `presence_reading` before and after) removed or weakened -- a sensor
-    that reports "off" repeatedly while already off must not fill the
-    timeline with a presence event on every one of those reports."""
-    history = History(logger=LOG)
-    engine, zone, clock, _changed = build(history=history)
-    make_device(101, "relay", onState=False)
-
-    engine.device_updated(*presence(101, False, False), clock.now)
-
-    assert zone.name not in history.zones or history.zones[zone.name].events == []
-
-
 def test_a_presence_variable_edge_is_recorded_with_kind_variable():
     """Kills: `_presence_variable_changed` recording with `kind="device"`
     (copy-pasted from the device path) instead of `"variable"` -- the

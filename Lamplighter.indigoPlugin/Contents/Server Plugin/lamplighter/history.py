@@ -139,12 +139,6 @@ class ZoneHistory:
         # Re-parsing the whole list on every append (the obvious way to
         # write this) is O(n) *strptime calls* per append, and a device with
         # a firehose of reports made appending itself the dominant cost.
-        overflow = len(self.events) - MAX_EVENTS
-        if overflow > 0:
-            self.events = self.events[overflow:]
-            if not (self.events and self.events[0].get("k") == "gap"):
-                gap_t = self.events[0]["t"] if self.events else _iso(now)
-                self.events.insert(0, {"t": gap_t, "k": "gap"})
         cutoff = now - dt.timedelta(hours=RETENTION_HOURS)
         stale = 0
         for event in self.events:
