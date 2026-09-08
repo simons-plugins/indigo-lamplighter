@@ -829,8 +829,8 @@ def test_levelintervals_with_no_prior_event_draws_nothing_until_the_first_report
         const events = [
             { t: "2026-09-08T05:00:00", k: "light", id: 201, level: 60 },
         ];
-        const before = levelIntervals(events, 201, dayStart, new Date(2026, 8, 8, 4, 0, 0), null);
-        const after = levelIntervals(events, 201, dayStart, now, null);
+        const before = levelIntervals(events, 201, dayStart, new Date(2026, 8, 8, 4, 0, 0));
+        const after = levelIntervals(events, 201, dayStart, now);
         console.log(JSON.stringify({ before, after }));
     """
     output = _run_page_logic(tmp_path, driver, name="levelintervals_unknown_start.js")
@@ -846,7 +846,7 @@ def test_levelintervals_carries_in_a_level_from_before_midnight(tmp_path):
         const events = [
             { t: "2026-09-07T22:00:00", k: "light", id: 201, level: 40 },
         ];
-        const intervals = levelIntervals(events, 201, dayStart, now, null);
+        const intervals = levelIntervals(events, 201, dayStart, now);
         console.log(JSON.stringify({ intervals }));
     """
     output = _run_page_logic(tmp_path, driver, name="levelintervals_carryin.js")
@@ -899,9 +899,11 @@ def test_minutesof_sums_interval_durations(tmp_path):
     assert output["m"] == 3  # 1 min + 2 min
 
 
-def test_statsfor_with_no_events_is_all_zeros_not_nan(tmp_path):
+def test_statsfor_with_events_but_no_lights_configured_is_zeros_not_nan(tmp_path):
     """Kills: any stat computed as a division or ratio that produces NaN on
-    an empty zone rather than an honest 0."""
+    an empty zone rather than an honest 0 -- pinned here with a real
+    (non-empty) `lightIds` list, since an empty one now takes a different
+    path entirely (see the null test right below)."""
     driver = """
         const dayStart = new Date(2026, 8, 8, 0, 0, 0);
         const now = new Date(2026, 8, 8, 6, 0, 0);
@@ -915,7 +917,34 @@ def test_statsfor_with_no_events_is_all_zeros_not_nan(tmp_path):
         "hereLightsOffMinutes": 0,
         "overrideCount": 0,
         "cycles": 0,
+        "unknownLights": [201, 202],
     }
+
+
+def test_statsfor_with_no_lights_configured_reports_null_not_zero(tmp_path):
+    """Kills: reporting 0 for every light-dependent figure when `lightIds`
+    is empty -- "no lights configured" and "lights configured but never
+    on" are different facts, and the old zeros-test above blessed the
+    wrong one of the two ("nothing known" read exactly like "definitely
+    off"). `occupiedMinutes` and `overrideCount` are NOT light-dependent
+    (they come from `state`/`override` events alone) and must stay
+    numeric even here."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 6, 0, 0);
+        const events = [
+            { t: "2026-09-08T01:00:00", k: "state", to: "occupied", from: "vacant" },
+        ];
+        console.log(JSON.stringify(statsFor(events, [], dayStart, now)));
+    """
+    output = _run_page_logic(tmp_path, driver, name="statsfor_no_lights.js")
+    assert output["lightsOnMinutes"] is None
+    assert output["onWhileEmptyMinutes"] is None
+    assert output["hereLightsOffMinutes"] is None
+    assert output["cycles"] is None
+    assert output["unknownLights"] == []
+    assert output["occupiedMinutes"] == 300  # 01:00-06:00, unaffected by lightIds
+    assert output["overrideCount"] == 0
 
 
 def test_statsfor_flags_lights_on_while_the_zone_was_not_occupied(tmp_path):
@@ -938,6 +967,23 @@ def test_statsfor_flags_lights_on_while_the_zone_was_not_occupied(tmp_path):
     assert output["cycles"] == 1
 
 
+def test_statsfor_unknownlights_names_ids_with_no_light_event_at_all(tmp_path):
+    """Kills: reporting 0 mismatches/writes for a light this zone has never
+    once heard report -- `unknownLights` must name it separately from a
+    light genuinely known to be off, so "0 lights on" cannot be mistaken
+    for "nothing has ever reported"."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 6, 0, 0);
+        const events = [
+            { t: "2026-09-08T01:00:00", k: "light", id: 201, level: 60 },
+        ];
+        console.log(JSON.stringify(statsFor(events, [201, 202], dayStart, now)));
+    """
+    output = _run_page_logic(tmp_path, driver, name="statsfor_unknown.js")
+    assert output["unknownLights"] == [202]
+
+
 def test_statsfor_a_gap_marker_event_does_not_break_the_computation(tmp_path):
     """Kills: assuming every event has the fields a `state`/`light`/`write`
     event carries, which a bare `{"k": "gap"}` does not -- a crash here
@@ -958,6 +1004,7 @@ def test_statsfor_a_gap_marker_event_does_not_break_the_computation(tmp_path):
     ("Kitchen - LED Strip", "Kitchen", "LED Strip"),
     ("DiningRoom - Shelves", "Dining Room", "Shelves"),
     ("Kitchen", "Kitchen", "Kitchen"),
+    ("Kitchenette Lamp", "Kitchen", "Kitchenette Lamp"),
     ("A very long light name indeed here", "", "A very long light…"),
 ])
 def test_lanelabel_drops_the_zone_prefix_then_truncates(tmp_path, name, zone, expected):
@@ -972,4 +1019,273 @@ def test_lanelabel_drops_the_zone_prefix_then_truncates(tmp_path, name, zone, ex
     """
     output = _run_page_logic(tmp_path, driver, name="lanelabel.js")
     assert output["label"] == expected
+
+
+# ---------------------------------------------------------- buildTimeline
+
+_FIND_BY_CLASS = """
+function findByClass(el, cls) {
+    let out = [];
+    if (el && el.className && String(el.className).split(" ").includes(cls)) out.push(el);
+    for (const c of (el && el.children) || []) out = out.concat(findByClass(c, cls));
+    return out;
+}
+document.createTextNode = text => ({ textContent: text });
+"""
+
+_ZONE_STATES = '{ state: "vacant", desired_summary: "" }'
+
+
+def test_buildtimeline_shows_history_status_when_not_ok(tmp_path):
+    """Kills: never reading the controller's `history_status` into the card
+    -- a user staring at an empty-looking timeline has no way to tell
+    "nothing has happened" from "the plugin stopped writing the file"."""
+    driver = (
+        _FAKE_DOM_STUB
+        + _FIND_BY_CLASS
+        + f"""
+        const wrap = buildTimeline({_ZONE_STATES}, [], null, [], "Kitchen", "write failed: disk full", null, false);
+        const notes = findByClass(wrap, "tl-unavailable").map(e => e.textContent);
+        console.log(JSON.stringify({{ notes }}));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="timeline_history_status.js")
+    assert any("history not being written" in n and "disk full" in n for n in output["notes"])
+
+
+def test_buildtimeline_says_nothing_extra_when_history_status_is_ok(tmp_path):
+    driver = (
+        _FAKE_DOM_STUB
+        + _FIND_BY_CLASS
+        + f"""
+        const wrap = buildTimeline({_ZONE_STATES}, [], null, [], "Kitchen", "ok", null, false);
+        const notes = findByClass(wrap, "tl-unavailable").map(e => e.textContent);
+        console.log(JSON.stringify({{ notes }}));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="timeline_history_status_ok.js")
+    assert output["notes"] == []
+
+
+def test_buildtimeline_flags_a_stale_generated_at(tmp_path):
+    """Kills: never checking the history file's own `generated_at` against
+    the current time -- a file that stopped updating an hour ago but is
+    still readable must not look current."""
+    driver = (
+        _FAKE_DOM_STUB
+        + _FIND_BY_CLASS
+        + f"""
+        const stale = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+        const wrap = buildTimeline({_ZONE_STATES}, [], null, [], "Kitchen", "ok", stale, false);
+        const notes = findByClass(wrap, "tl-note").map(e => e.textContent);
+        console.log(JSON.stringify({{ notes }}));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="timeline_stale.js")
+    assert any("history last written" in n for n in output["notes"])
+
+
+def test_buildtimeline_says_nothing_for_a_recent_generated_at(tmp_path):
+    driver = (
+        _FAKE_DOM_STUB
+        + _FIND_BY_CLASS
+        + f"""
+        const recent = new Date(Date.now() - 30 * 1000).toISOString();
+        const wrap = buildTimeline({_ZONE_STATES}, [], null, [], "Kitchen", "ok", recent, false);
+        const notes = findByClass(wrap, "tl-note").map(e => e.textContent);
+        console.log(JSON.stringify({{ notes }}));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="timeline_fresh.js")
+    assert not any("history last written" in n for n in output["notes"])
+
+
+def test_buildtimeline_notes_a_zone_with_no_history_entry_yet(tmp_path):
+    """Kills: treating "the file loaded fine but has no entry for this
+    zone" the same as "nothing has happened" -- the missing-entry case must
+    say so rather than drawing silent empty lanes indistinguishable from a
+    genuinely quiet zone."""
+    driver = (
+        _FAKE_DOM_STUB
+        + _FIND_BY_CLASS
+        + f"""
+        const wrap = buildTimeline({_ZONE_STATES}, [], null, [], "Kitchen", "ok", null, true);
+        const notes = findByClass(wrap, "tl-note").map(e => e.textContent);
+        console.log(JSON.stringify({{ notes }}));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="timeline_no_entry.js")
+    assert any("no history for this zone yet" in n for n in output["notes"])
+
+
+def test_buildtimeline_counts_events_it_could_not_use(tmp_path):
+    """Kills: silently dropping unreadable events with no visible trace --
+    an unparseable timestamp, an unknown `k`, and a non-number `level`
+    must each be counted, not just quietly excluded from the lanes."""
+    driver = (
+        _FAKE_DOM_STUB
+        + _FIND_BY_CLASS
+        + f"""
+        const events = [
+            {{ t: "not-a-timestamp", k: "state", to: "occupied" }},
+            {{ t: "2026-09-08T01:00:00", k: "made-up-kind" }},
+            {{ t: "2026-09-08T01:00:00", k: "light", id: 201, level: "sixty" }},
+            {{ t: "2026-09-08T01:00:00", k: "light", id: 201, level: 60 }},
+        ];
+        const wrap = buildTimeline({_ZONE_STATES}, events, null, [], "Kitchen", "ok", null, false);
+        const notes = findByClass(wrap, "tl-note").map(e => e.textContent);
+        console.log(JSON.stringify({{ notes }}));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="timeline_unusable.js")
+    assert any("3 history events could not be read" in n for n in output["notes"])
+
+
+def test_buildtimeline_counts_an_override_end_with_no_matching_start(tmp_path):
+    """Kills: silently discarding an unpaired override `end` event instead
+    of counting it as something the marks lane could not use."""
+    driver = (
+        _FAKE_DOM_STUB
+        + _FIND_BY_CLASS
+        + f"""
+        const events = [
+            {{ t: "2026-09-08T01:00:00", k: "override", phase: "end", device: 201 }},
+        ];
+        const wrap = buildTimeline({_ZONE_STATES}, events, null, [], "Kitchen", "ok", null, false);
+        const notes = findByClass(wrap, "tl-note").map(e => e.textContent);
+        console.log(JSON.stringify({{ notes }}));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="timeline_unpaired_override.js")
+    assert any("1 history event could not be read" in n for n in output["notes"])
+
+
+def test_buildtimeline_says_nothing_when_every_event_is_usable(tmp_path):
+    driver = (
+        _FAKE_DOM_STUB
+        + _FIND_BY_CLASS
+        + f"""
+        const events = [
+            {{ t: "2026-09-08T01:00:00", k: "state", to: "occupied", from: "vacant" }},
+        ];
+        const wrap = buildTimeline({_ZONE_STATES}, events, null, [], "Kitchen", "ok", null, false);
+        const notes = findByClass(wrap, "tl-note").map(e => e.textContent);
+        console.log(JSON.stringify({{ notes }}));
+    """
+    )
+    output = _run_page_logic(tmp_path, driver, name="timeline_all_usable.js")
+    assert not any("could not be read" in n for n in output["notes"])
+
+
+# ---------------------------------------------------------- pollHistoryOnce
+
+def test_pollhistoryonce_only_rerenders_when_the_history_payload_changes(tmp_path):
+    """Kills: forcing `lastRenderedJson = null` (and a re-render) on every
+    single poll regardless of whether anything changed -- a quiet house
+    would otherwise rebuild the whole DOM every 5 seconds forever."""
+    driver = """
+        let renderCalls = 0;
+        render = () => { renderCalls++; };
+        lastDevicesPayload = [{ id: 1 }];
+        historyApi = { getHistory: async () => ({ version: 1, generated_at: "2026-09-08T12:00:00", zones: { Kitchen: { events: [] } } }) };
+
+        (async () => {
+            await pollHistoryOnce();
+            await pollHistoryOnce();
+            await pollHistoryOnce();
+            console.log(JSON.stringify({ renderCalls }));
+        })();
+    """
+    output = _run_page_logic(tmp_path, driver, name="poll_dedupe.js")
+    assert output["renderCalls"] == 1
+
+
+def test_pollhistoryonce_rerenders_when_the_history_payload_actually_changes(tmp_path):
+    driver = """
+        let renderCalls = 0;
+        render = () => { renderCalls++; };
+        lastDevicesPayload = [{ id: 1 }];
+        let call = 0;
+        historyApi = {
+            getHistory: async () => {
+                call++;
+                return {
+                    version: 1,
+                    generated_at: "2026-09-08T12:00:00",
+                    zones: { Kitchen: { events: call === 1 ? [] : [{ t: "2026-09-08T12:00:00", k: "gap" }] } },
+                };
+            },
+        };
+
+        (async () => {
+            await pollHistoryOnce();
+            await pollHistoryOnce();
+            console.log(JSON.stringify({ renderCalls }));
+        })();
+    """
+    output = _run_page_logic(tmp_path, driver, name="poll_change.js")
+    assert output["renderCalls"] == 2
+
+
+def test_pollhistoryonce_names_a_404_with_a_friendly_message(tmp_path):
+    """Kills: showing the raw 'HTTP 404: ...' transport error for the
+    completely normal case of the plugin not having written the file yet
+    (within 30 s of the first event, per the plugin's own write interval)."""
+    driver = """
+        historyApi = {
+            getHistory: async () => {
+                const e = new Error("HTTP 404: Not Found");
+                e.status = 404;
+                throw e;
+            },
+        };
+
+        (async () => {
+            await pollHistoryOnce();
+            console.log(JSON.stringify({ historyZones, historyErrorMsg }));
+        })();
+    """
+    output = _run_page_logic(tmp_path, driver, name="poll_404.js")
+    assert output["historyZones"] is None
+    assert "writes it within 30 s" in output["historyErrorMsg"]
+
+
+def test_pollhistoryonce_rejects_the_wrong_version(tmp_path):
+    """Kills: reading a future/incompatible version's `zones` object as if
+    it were shape-compatible with what this page understands."""
+    driver = """
+        historyApi = {
+            getHistory: async () => ({ version: 2, generated_at: "2026-09-08T12:00:00", zones: { Kitchen: { events: [] } } }),
+        };
+
+        (async () => {
+            await pollHistoryOnce();
+            console.log(JSON.stringify({ historyZones, historyErrorMsg }));
+        })();
+    """
+    output = _run_page_logic(tmp_path, driver, name="poll_version.js")
+    assert output["historyZones"] is None
+    assert "version 2" in output["historyErrorMsg"]
+    assert "version 1" in output["historyErrorMsg"]
+
+
+def test_pollhistoryonce_catches_a_render_failure_without_raising(tmp_path):
+    """Kills: leaving the `render(...)` call inside the poll's `finally`
+    unguarded -- a bug in rendering one bad payload must not stop every
+    future poll's error handling from running cleanly, and must surface
+    somewhere a user can see it."""
+    driver = """
+        const errs = [];
+        showErr = msg => errs.push(msg);
+        render = () => { throw new Error("boom"); };
+        lastDevicesPayload = [{ id: 1 }];
+        historyApi = { getHistory: async () => ({ version: 1, generated_at: "2026-09-08T12:00:00", zones: {} }) };
+
+        (async () => {
+            await pollHistoryOnce();  // must not raise
+            console.log(JSON.stringify({ errs }));
+        })();
+    """
+    output = _run_page_logic(tmp_path, driver, name="poll_render_raises.js")
+    assert any("timeline render failed" in e and "boom" in e for e in output["errs"])
 

@@ -87,7 +87,8 @@ def test_an_up_to_date_page_is_not_rewritten(install, monkeypatch, caplog):
     def guarded_replace(src, dst, *_a, **_k):
         # Only the page's own destination is forbidden here -- startup also
         # writes the (unrelated) history data file on every run, by design,
-        # regardless of "Manage the status page" (see test_history.py).
+        # regardless of "Manage the status page" (see
+        # test_plugin_wiring.py::test_managepage_off_does_not_stop_the_history_file_being_written).
         if str(dst) in forbidden_paths:
             raise AssertionError("page must not be written: os.replace")
 
@@ -247,9 +248,17 @@ def test_a_programming_error_in_the_page_sync_is_logged_with_a_traceback_not_as_
 
     # The old filter here looked for "copy it by hand", which the real
     # message never contains ("Copy the bundled copy ... there by hand") --
-    # it matched nothing and always passed. A programming error must not
-    # produce the friendly filesystem-problem WARNING at all.
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    # it matched nothing and always passed. A programming error in the page
+    # sync must not produce the friendly filesystem-problem WARNING at all.
+    # `_web_page_paths` is also what `_load_history` resolves its own path
+    # through (`_history_path`), so the same monkeypatch legitimately trips
+    # ITS "could not determine the path" WARNING too -- that one is excluded
+    # here rather than asserting no warnings at all, which would make this
+    # test fail for a reason it does not claim to care about.
+    warnings = [
+        r for r in caplog.records
+        if r.levelname == "WARNING" and "history file" not in r.getMessage()
+    ]
     assert warnings == []
 
 
@@ -466,7 +475,15 @@ def test_getinstallfolderpath_raising_is_reported_but_does_not_escape_startup(
     with caplog.at_level("DEBUG"):
         plug.startup()  # must not raise
 
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    # `_load_history` resolves its own path through the same
+    # `getInstallFolderPath()`, and a later call from it also lands on the
+    # "raise" branch of `flaky()` -- so it legitimately logs its own WARNING
+    # too (`_load_history` path failures are WARNING, not DEBUG). That one is
+    # excluded here; this test's own claim is about the page-sync WARNING.
+    warnings = [
+        r for r in caplog.records
+        if r.levelname == "WARNING" and "history file" not in r.getMessage()
+    ]
     assert len(warnings) == 1
     message = warnings[0].getMessage()
     assert "install folder" in message.lower()

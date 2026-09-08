@@ -483,14 +483,19 @@ class Plugin(indigo.PluginBase):
                     continue
                 now = dt.datetime.now()
                 try:
-                    self.engine.tick(now)
-                except Exception:
                     # One bad pass must not end the worker: the next tick is a
-                    # second chance and the traceback says what broke.
+                    # second chance and the traceback says what broke. All
+                    # four steps share this one guard, not just `engine.tick`
+                    # -- a raise from `_write_history` or `_check_config_file`
+                    # is exactly as capable of ending the thread as one from
+                    # the engine, and section 10 asks every one of them to
+                    # degrade the same way: log it, keep going.
+                    self.engine.tick(now)
+                    self._sync_controller()
+                    self._check_config_file(dt.datetime.now())
+                    self._write_history(dt.datetime.now())
+                except Exception:
                     self.logger.exception("Lamplighter: the worker pass raised")
-                self._sync_controller()
-                self._check_config_file(dt.datetime.now())
-                self._write_history(dt.datetime.now())
                 self.sleep(self._loop_delay(dt.datetime.now()))
         except self.StopThread:
             pass
@@ -1205,7 +1210,7 @@ class Plugin(indigo.PluginBase):
             install = indigo.server.getInstallFolderPath()
             path = self._history_path(install)
         except Exception as exc:  # pylint: disable=broad-except
-            self.logger.debug(
+            self.logger.warning(
                 f"Lamplighter: could not determine the history file's path "
                 f"({exc}); starting today's history empty"
             )
@@ -1215,13 +1220,28 @@ class Plugin(indigo.PluginBase):
                 text = handle.read()
         except FileNotFoundError:
             return
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError, not just OSError: a file that exists but is not
+            # valid UTF-8 fails the *decode* `open(..., encoding="utf-8")`
+            # does on read, and `UnicodeDecodeError` is a `ValueError`, not
+            # an `OSError` -- without this it would propagate straight out
+            # of startup() rather than degrading to an empty history (R15).
             self.logger.warning(
                 f"Lamplighter: could not read the history file at {path} ({exc}); "
                 "starting today's history empty"
             )
             return
-        self.history.load(text, now=dt.datetime.now())
+        try:
+            self.history.load(text, now=dt.datetime.now())
+        except Exception:  # pylint: disable=broad-except
+            # `History.load` is documented to never raise, but startup must
+            # not go down even if that promise is ever broken by a future
+            # change -- the store is already empty at this point (nothing
+            # has recorded yet), so there is nothing to put back.
+            self.logger.exception(
+                "Lamplighter: loading the history file raised; starting "
+                "today's history empty"
+            )
 
     def _write_history(self, now, force=False):
         """Flush the timeline's data file, at most every
@@ -1231,12 +1251,13 @@ class Plugin(indigo.PluginBase):
         pref governs a bundled HTML file the plugin copies, and this is data
         the plugin itself generates -- untying them is called out in the
         PRD precisely so a user who hand-edits the page still gets a working
-        timeline. Failure never raises: it is warned once (the path
-        changing between failures re-arms the warning, same as everywhere
-        else `compare.warn_once` is used) and surfaced on the controller
-        device's `history_status` state, and history keeps recording in
-        memory regardless -- a filesystem problem must not stop the plugin
-        deciding anything about a light.
+        timeline. Failure never raises: it is warned once (a success resets
+        the warning key, so a later, separate failure is reported afresh
+        rather than latched into silence forever -- see
+        `compare.reset_warnings`) and surfaced on the controller device's
+        `history_status` state, and history keeps recording in memory
+        regardless -- a filesystem problem must not stop the plugin deciding
+        anything about a light.
         """
         if not force and not self.history.dirty:
             return
@@ -1251,31 +1272,56 @@ class Plugin(indigo.PluginBase):
             install = indigo.server.getInstallFolderPath()
             dest = self._history_path(install)
         except Exception as exc:  # pylint: disable=broad-except
+            compare.warn_once(
+                self.logger,
+                ("history-path", "install"),
+                f"Lamplighter: could not determine the history file's path ({exc}). "
+                "History keeps recording in memory, but nothing is being written to disk "
+                "until this is fixed.",
+            )
             self._set_history_status(f"could not determine the history file's path ({exc})")
             return
 
         dest_dir = os.path.dirname(dest)
         tmp = f"{dest}.tmp"
+        # Snapshotted (and `dirty` cleared) BEFORE the write is attempted, not
+        # after it succeeds: a write that then fails puts `dirty` back below,
+        # but a write that raises AFTER partially applying (e.g. `os.replace`
+        # succeeding on some filesystems even as the caller sees an error)
+        # must not lose what was already captured here.
+        text = self.history.snapshot_and_clear(now)
         try:
             os.makedirs(dest_dir, exist_ok=True)
-            text = self.history.to_json(now)
             with open(tmp, "w", encoding="utf-8") as handle:
                 handle.write(text)
             os.replace(tmp, dest)
-        except OSError as exc:
+        except Exception as exc:  # pylint: disable=broad-except
+            # Anything, not just OSError: a broken filesystem driver, a
+            # permissions layer that raises something else entirely -- none
+            # of it may take the worker thread down (R15), and `dirty` goes
+            # back so the next periodic pass tries again rather than
+            # believing this write actually happened.
+            self.history.dirty = True
             leftover = self._cleanup_tmp(tmp)
-            compare.warn_once(
+            first_time = compare.warn_once(
                 self.logger,
                 ("history-write", dest),
                 f"Lamplighter: could not write the history file at {dest} ({exc}).{leftover} "
                 "History keeps recording in memory, but the status page's timeline will "
                 "not reflect it until this is fixed.",
             )
+            if first_time:
+                self.logger.exception("Lamplighter: traceback follows")
             self._set_history_status(f"write failed: {exc}")
             return
-        self.history.dirty = False
+
+        was_failing = self._history_status != "ok"
+        compare.reset_warnings(("history-write", dest))
+        compare.reset_warnings(("history-path", "install"))
         self._history_last_write = now
         self._set_history_status("ok")
+        if was_failing:
+            self.logger.info("Lamplighter: history file is being written again.")
 
     def _set_history_status(self, status):
         if status == self._history_status:
@@ -1289,11 +1335,16 @@ class Plugin(indigo.PluginBase):
         """Best-effort removal of a half-written temp file. Returns a note
         to fold into a failure warning when even the cleanup fails, so a
         leftover ``.tmp`` is never left unmentioned for the user to trip
-        over later -- empty string when there is nothing to add."""
+        over later -- empty string when there is nothing to add, including
+        when the failure happened before the temp file was ever created
+        (e.g. `os.makedirs` itself raised) -- there is no partial file to
+        claim was left behind in that case."""
         if tmp is None:
             return ""
         try:
             os.remove(tmp)
+        except FileNotFoundError:
+            return ""
         except OSError:
             return f" A partial file was left at {tmp}; delete it by hand."
         return ""

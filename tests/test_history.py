@@ -9,9 +9,11 @@ module has no Indigo dependency at all, so these run against `History` and
 import datetime as dt
 import json
 import logging
+import threading
 
 import pytest
 
+from lamplighter import history as history_module
 from lamplighter.history import MAX_EVENTS, RETENTION_HOURS, VERSION, History, ZoneHistory
 
 NOW = dt.datetime(2026, 9, 8, 20, 0, 0)
@@ -155,8 +157,8 @@ def test_recording_marks_the_store_dirty():
 
 def test_a_duplicate_light_report_does_not_mark_the_store_dirty():
     """Kills: marking dirty unconditionally, which would make the periodic
-    flush write every WRITE_INTERVAL_SECONDS even in a house with nothing
-    happening beyond link-quality noise."""
+    flush write every HISTORY_WRITE_INTERVAL_SECONDS even in a house with
+    nothing happening beyond link-quality noise."""
     history = History(logger=LOG)
     history.record_light("Kitchen", NOW, 201, 60)
     history.dirty = False
@@ -304,3 +306,135 @@ def test_load_trims_stale_events_the_same_way_append_does():
     )
     history.load(text, now=NOW)
     assert history.zones["Kitchen"].events == []
+
+
+def test_load_drops_an_event_with_an_unhashable_id_without_crashing(caplog):
+    """Kills: trusting a loaded event's `id` enough to use it as a dict key
+    in `rebuild_last_levels` -- a corrupted file with a list where an int
+    device id belongs would otherwise raise `TypeError: unhashable type`
+    and take startup down with it (R15)."""
+    history = History(logger=LOG)
+    text = json.dumps(
+        {
+            "version": VERSION,
+            "zones": {
+                "Kitchen": {
+                    "events": [
+                        {"t": "2026-09-08T19:00:00", "k": "light", "id": [1, 2], "level": 60},
+                        {"t": "2026-09-08T19:30:00", "k": "light", "id": 201, "level": 30},
+                    ]
+                }
+            },
+        }
+    )
+    with caplog.at_level(logging.WARNING):
+        history.load(text, now=NOW)  # must not raise
+    assert len(history.zones["Kitchen"].events) == 1
+    assert history.zones["Kitchen"].events[0]["id"] == 201
+    assert any("malformed" in r.getMessage() for r in caplog.records)
+
+
+# ------------------------------------------------------------- thread safety
+
+
+def test_snapshot_and_clear_is_locked_against_a_concurrent_append(monkeypatch):
+    """Kills: no lock at all around the serialise-and-clear, or a lock that
+    releases before `dirty` is cleared -- either way a `record_write`
+    racing the flush could be silently dropped: not in the snapshot just
+    taken, and not marked dirty for the next one either. A real background
+    thread and a paused `json.dumps` are what actually exercise
+    `History._lock`, not merely asserting the attribute exists."""
+    history = History(logger=LOG)
+    history.record_write("Kitchen", NOW, 201, 60)
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_dumps = json.dumps
+
+    def dumps_that_pauses(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=1)
+        return real_dumps(*args, **kwargs)
+
+    monkeypatch.setattr(history_module.json, "dumps", dumps_that_pauses)
+
+    def racer():
+        entered.wait(timeout=1)
+        # If `snapshot_and_clear` is NOT holding `_lock` for its whole
+        # duration, this lands while the dict comprehension above is being
+        # built and could corrupt or duplicate it. If the lock IS held,
+        # this simply blocks until `snapshot_and_clear` releases it.
+        history.record_write("Kitchen", NOW, 202, 1)
+        release.set()
+
+    thread = threading.Thread(target=racer)
+    thread.start()
+    text = history.snapshot_and_clear(NOW)
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    payload = json.loads(text)
+    ids_written = {e.get("id") for e in payload["zones"]["Kitchen"]["events"]}
+    assert 202 in ids_written or history.dirty is True
+
+
+def test_history_zones_forget_drops_the_zone_and_marks_dirty():
+    """Kills: leaving a departed zone's history in memory (and therefore in
+    the next written file) forever once its zone leaves the configuration."""
+    history = History(logger=LOG)
+    history.record_state("Hallway", NOW, "occupied", "vacant", "presence: PIR")
+    history.dirty = False
+
+    history.forget("Hallway")
+
+    assert "Hallway" not in history.zones
+    assert history.dirty is True
+
+
+def test_history_forget_of_an_unknown_zone_is_a_quiet_no_op():
+    history = History(logger=LOG)
+    history.forget("Nonexistent")  # must not raise
+    assert history.dirty is False
+
+
+# ------------------------------------------------------------------- _trim
+
+
+def test_trim_drops_an_event_whose_timestamp_will_not_parse_and_keeps_scanning():
+    """Kills: stopping the stale-prefix scan on the first unparseable
+    timestamp instead of dropping it and continuing -- which would leave
+    every genuinely stale event behind it stuck in the file forever."""
+    zh = ZoneHistory()
+    old = NOW - dt.timedelta(hours=RETENTION_HOURS + 1)
+    zh.events = [
+        {"t": "not-a-timestamp", "k": "state", "to": "vacant"},
+        {"t": old.strftime("%Y-%m-%dT%H:%M:%S"), "k": "state", "to": "occupied"},
+    ]
+    zh._trim(NOW)
+    assert zh.events == []
+
+
+def test_the_cap_and_a_subsequent_age_trim_both_still_work_on_increasing_timestamps():
+    """Kills: stamping the gap marker with `now` (the append time) instead
+    of the oldest surviving event's own timestamp -- a gap sitting first in
+    the list with a timestamp LATER than the real event right behind it
+    breaks the non-decreasing order the age-trim scan depends on to stop
+    early, so on the very next append it would read the gap as "not stale"
+    and stop scanning right there, leaving the genuinely stale real event
+    behind it stuck forever. The earlier cap tests all use a constant NOW
+    and cannot catch this."""
+    zh = ZoneHistory()
+    base = NOW - dt.timedelta(days=3)
+    for i in range(MAX_EVENTS + 1):
+        # Each append is a little later than the last, and each is already
+        # old enough (days ago) that the very next real-time append below
+        # will find it stale.
+        zh.append(base + dt.timedelta(seconds=i), "write", id=1, level=1)
+    assert zh.events[0]["k"] == "gap"
+
+    # A fresh append "now" (days after every event above) must age out
+    # everything from the cap-triggered burst, gap included.
+    zh.append(NOW, "write", id=1, level=2)
+    assert len(zh.events) == 1
+    assert zh.events[0]["k"] == "write"
+    assert zh.events[0]["level"] == 2

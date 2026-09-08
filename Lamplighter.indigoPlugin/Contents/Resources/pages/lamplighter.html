@@ -190,10 +190,11 @@ word-break:break-word;width:100%}
 
 <div class="hdr" id="hdr" hidden></div>
 <div class="legend" id="legend" hidden>
-  <span class="lg-item"><span class="lg-swatch presence"></span>Presence</span>
-  <span class="lg-item"><span class="lg-swatch light"></span>Light (deeper = brighter)</span>
+  <span class="lg-item"><span class="lg-swatch presence"></span>Presence (thin ticks are motion edges)</span>
+  <span class="lg-item"><span class="lg-swatch light"></span>Light (deeper = brighter; thin ticks are commanded writes)</span>
   <span class="lg-item"><span class="lg-swatch override"></span>Override</span>
   <span class="lg-item">☀ Off duty (bright)</span>
+  <span class="lg-item" style="color:var(--bad)">⋯ History truncated</span>
   <span class="lg-item"><span class="lg-swatch now"></span>Now</span>
 </div>
 
@@ -242,9 +243,11 @@ class IndigoAPI {
     // The timeline's data source (PRD section 12). A plain static asset, not
     // a `/v2/api/...` route, so a missing or malformed file is a normal
     // fetch failure the caller handles the same way as any other -- see
-    // `pollHistory()` below, which never lets it block the device poll.
+    // `pollHistoryOnce()` below, which never lets it block the device poll.
+    // `tolerantJson`: Indigo may serve this .json file with a text/plain
+    // Content-Type, and this endpoint must still read it as JSON when it does.
     async getHistory() {
-        return this._get("/static/pages/lamplighter-history.json");
+        return this._fetch("/static/pages/lamplighter-history.json", { method: "GET", tolerantJson: true });
     }
 
     // Read-only page: this class keeps the shared IndigoAPI shape from the
@@ -304,16 +307,20 @@ class IndigoAPI {
     async _fetch(path, options = {}) {
         this._requireConfigured();
 
+        // `tolerantJson` is this class's own option, not a `fetch()` one --
+        // pulled out before spreading `options` into the request below so it
+        // never reaches the network layer as a bogus init field.
+        const { tolerantJson, ...fetchOptions } = options;
         const url = `${this._baseURL}${path}`;
         const headers = {
             Authorization: `Bearer ${this._apiKey}`,
             Accept: "application/json",
-            ...options.headers,
+            ...fetchOptions.headers,
         };
 
         let response;
         try {
-            response = await fetch(url, { ...options, headers });
+            response = await fetch(url, { ...fetchOptions, headers });
         } catch (err) {
             const error = new IndigoAPIError("Network error: " + err.message, 0, err);
             this._handleError(error);
@@ -341,7 +348,21 @@ class IndigoAPI {
         }
 
         const contentType = response.headers.get("Content-Type") || "";
-        if (!contentType.includes("json")) return null;
+        if (!contentType.includes("json")) {
+            if (!tolerantJson) return null;
+            // Indigo may serve a plain static file (like the history JSON)
+            // with a Content-Type of text/plain rather than
+            // application/json -- `tolerantJson` callers still want the
+            // parsed object rather than being told there was nothing here.
+            const text = await response.text().catch(() => "");
+            try {
+                return JSON.parse(text);
+            } catch (err) {
+                const error = new IndigoAPIError("Invalid JSON response", response.status, err);
+                this._handleError(error);
+                throw error;
+            }
+        }
 
         try {
             return await response.json();
@@ -546,7 +567,9 @@ function laneLabel(name, zone) {
     // Space-insensitive: "DiningRoom - Shelves" in the "Dining Room" zone.
     const letters = String(zone).replace(/\s+/g, "").split("")
       .map(c => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*").join("");
-    const match = label.match(new RegExp("^" + letters + "[\\s\\-–—:·]*", "i"));
+    // The prefix must end at a word boundary: "Kitchenette Lamp" in the
+    // Kitchen zone keeps its name rather than becoming "ette Lamp".
+    const match = label.match(new RegExp("^" + letters + "(?![A-Za-z0-9])[\\s\\-–—:·]*", "i"));
     if (match) label = label.slice(match[0].length);
   }
   if (!label) label = String(name || "");
@@ -595,10 +618,10 @@ function bandSegments(period) {
 // `statsFor` actually needs -- a stat is nothing but interval arithmetic on
 // the same two questions the lanes already answer: "when was X true".
 
-// This date's position in [0, 100) of the 24 h window starting at `dayStart`.
+// This date's position in [0, 100] of the 24 h window starting at `dayStart`.
 // Clamped: a `date` before dayStart or at/after the next midnight reads as
-// the nearest edge rather than a negative or >100 value that would push a
-// mark off the drawn frame.
+// the nearest edge (0 or 100, both inclusive) rather than a negative or
+// >100 value that would push a mark off the drawn frame.
 function pctOfDay(date, dayStart) {
   const dayMs = 24 * 60 * 60 * 1000;
   const pct = ((date.getTime() - dayStart.getTime()) / dayMs) * 100;
@@ -647,13 +670,17 @@ function intervalsFromStates(events, dayStart, now) {
 }
 
 // One device's `light` events -> [[startMs, endMs, level], ...] where
-// level > 0, clipped to [dayStart, now]. `carryIn` is the level known to be
-// in force at dayStart (from the caller resolving it against the full 48h
-// of events, since a light already on before midnight has no event inside
-// today's window at all); null/undefined means genuinely unknown, in which
-// case nothing is drawn until the first event -- an unknown start must not
-// default to "off", which would claim a fact nobody has.
-function levelIntervals(events, deviceId, dayStart, now, carryIn) {
+// level > 0, clipped to [dayStart, now]. The level in force AT dayStart is
+// resolved from `events` itself -- the last `light` event at or before it,
+// which may be from yesterday, since history keeps 48h -- exactly the way
+// `intervalsFromStates` resolves the state in force at midnight above.
+// There is no separate carry-in parameter: every caller has always passed
+// the full 48h of events and let this function work it out, so a
+// `carryIn` argument here was dead weight, not a real second way to call
+// this. Before the very first event of all, the level is genuinely
+// unknown, in which case nothing is drawn until it arrives -- an unknown
+// start must not default to "off", which would claim a fact nobody has.
+function levelIntervals(events, deviceId, dayStart, now) {
   const dayStartMs = dayStart.getTime();
   const nowMs = now.getTime();
   const lightEvents = (events || [])
@@ -662,7 +689,7 @@ function levelIntervals(events, deviceId, dayStart, now, carryIn) {
     .filter(e => !isNaN(e.t))
     .sort((a, b) => a.t - b.t);
 
-  let level = carryIn == null ? null : carryIn;
+  let level = null;
   let idx = 0;
   while (idx < lightEvents.length && lightEvents[idx].t <= dayStartMs) {
     level = lightEvents[idx].level;
@@ -746,19 +773,24 @@ function minutesOf(intervals) {
 // The stats row under one zone's timeline, from its raw event list. Pure,
 // so the table under it can pin every definition without a DOM. `lightIds`
 // is the zone's lights in desired_summary order; each is read with no
-// carry-in ("here with lights off" / "on while empty" degrade to "unknown
-// before the first report today reads as off", which is the conservative
-// direction for a household reading these as facts to act on).
+// carry-in -- `levelIntervals` resolves its own carry-in from `events`
+// itself now, there is no separate parameter to pass one through ("here
+// with lights off" / "on while empty" degrade to "unknown before the
+// first report today reads as off", which is the conservative direction
+// for a household reading these as facts to act on). `unknownLights` is
+// every id in `lightIds` with no `light` event anywhere in `events` at
+// all (typically the full 48h window, not just today) -- the caller shows
+// that count so "0 lights on, 0 overrides" cannot be mistaken for a zone
+// this page has never actually heard a light report from. When `lightIds`
+// is empty, every light-DEPENDENT figure is `null` rather than a
+// misleading 0 -- "no lights configured" and "lights configured but
+// quiet" are different facts and must not render the same number.
 function statsFor(zoneEvents, lightIds, dayStart, now) {
   const events = zoneEvents || [];
+  const ids = lightIds || [];
   const { occupied, overridden } = intervalsFromStates(events, dayStart, now);
   const occUnion = unionIntervals(occupied);
   const overUnion = unionIntervals(overridden);
-  const perLight = (lightIds || []).map(id => levelIntervals(events, id, dayStart, now, null));
-  const anyLight = unionIntervals(perLight.flat());
-
-  const onWhileEmpty = subtractIntervals(subtractIntervals(anyLight, occUnion), overUnion);
-  const hereLightsOff = subtractIntervals(occUnion, anyLight);
 
   const dayStartMs = dayStart.getTime();
   const nowMs = now.getTime();
@@ -768,6 +800,24 @@ function statsFor(zoneEvents, lightIds, dayStart, now) {
     return !isNaN(t) && t >= dayStartMs && t <= nowMs;
   }).length;
 
+  if (!ids.length) {
+    return {
+      occupiedMinutes: minutesOf(occUnion),
+      lightsOnMinutes: null,
+      onWhileEmptyMinutes: null,
+      hereLightsOffMinutes: null,
+      overrideCount: overrideStarts,
+      cycles: null,
+      unknownLights: [],
+    };
+  }
+
+  const perLight = ids.map(id => levelIntervals(events, id, dayStart, now));
+  const anyLight = unionIntervals(perLight.flat());
+  const onWhileEmpty = subtractIntervals(subtractIntervals(anyLight, occUnion), overUnion);
+  const hereLightsOff = subtractIntervals(occUnion, anyLight);
+  const unknownLights = ids.filter(id => !events.some(e => e && e.k === "light" && e.id === id));
+
   return {
     occupiedMinutes: minutesOf(occUnion),
     lightsOnMinutes: minutesOf(anyLight),
@@ -776,8 +826,13 @@ function statsFor(zoneEvents, lightIds, dayStart, now) {
     overrideCount: overrideStarts,
     // A rising edge per disjoint "any light on" block -- the union already
     // collapsed overlapping/adjacent intervals, so its length IS the cycle
-    // count with no separate edge-detection pass needed.
+    // count with no separate edge-detection pass needed. A light already on
+    // AT dayStart (carried in from before midnight, same as `intervalsFromStates`
+    // above) starts its block right at dayStart rather than at a rising edge
+    // that happened yesterday, and still counts as exactly one cycle here --
+    // there is no true "rising edge" inside today's window for it.
     cycles: anyLight.length,
+    unknownLights,
   };
 }
 
@@ -1129,7 +1184,13 @@ function periodsForTimeline(s) {
 // zone's raw event list from the history file, or null when it could not be
 // read at all (see `historyErrorMsg`, which is shown instead of a blank
 // timeline pretending nothing happened -- never silently omitted).
-function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone) {
+// `historyStatus` is the controller's own `history_status` state (not "ok"
+// means the plugin itself is not currently WRITING the file, independent of
+// whether this particular fetch just succeeded); `historyGeneratedAt` is the
+// file's own `generated_at` timestamp, used to flag a file that is readable
+// but stale; `noEntryYet` means the file loaded fine but has never recorded
+// anything for this particular zone.
+function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone, historyStatus, historyGeneratedAt, noEntryYet) {
   const wrap = document.createElement("div");
   wrap.className = "timeline-wrap";
 
@@ -1170,6 +1231,25 @@ function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone) {
     wrap.appendChild(note);
   }
 
+  // Shown regardless of whether THIS fetch happened to succeed: the plugin
+  // itself may not be writing the file (a full disk, an unwritable Web
+  // Assets folder) even while the last-good copy still reads fine.
+  if (historyStatus != null && historyStatus !== "ok") {
+    const note = document.createElement("div");
+    note.className = "tl-unavailable";
+    note.textContent = "history not being written: " + historyStatus;
+    wrap.appendChild(note);
+  }
+  if (historyGeneratedAt) {
+    const genMs = new Date(historyGeneratedAt).getTime();
+    if (!isNaN(genMs) && (now.getTime() - genMs) > 10 * 60 * 1000) {
+      const note = document.createElement("div");
+      note.className = "tl-note";
+      note.textContent = "history last written " + fmtTime(historyGeneratedAt);
+      wrap.appendChild(note);
+    }
+  }
+
   if (historyEvents == null) {
     const note = document.createElement("div");
     note.className = "tl-unavailable";
@@ -1178,12 +1258,36 @@ function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone) {
     return wrap;
   }
 
+  if (noEntryYet) {
+    const note = document.createElement("div");
+    note.className = "tl-note";
+    note.textContent = "no history for this zone yet";
+    wrap.appendChild(note);
+  }
+
+  // Every lane below reads `usableEvents`, not the raw `historyEvents` --
+  // one pass here drops (and counts) whatever a lane could never have used
+  // anyway: an unparseable `t` (sorting on it would compare against NaN,
+  // which is not a defined order), a `k` this page does not recognise, or a
+  // `light`/`write` event whose `level` is not a number. Counted rather than
+  // silently dropped (R15): an empty timeline and a timeline full of
+  // unreadable events must not look the same.
+  const KNOWN_EVENT_KINDS = new Set(["state", "presence", "light", "write", "override", "offduty", "gap"]);
+  let unusableCount = 0;
+  const usableEvents = [];
+  for (const e of historyEvents) {
+    if (!e || typeof e.t !== "string" || isNaN(new Date(e.t).getTime())) { unusableCount++; continue; }
+    if (!KNOWN_EVENT_KINDS.has(e.k)) { unusableCount++; continue; }
+    if ((e.k === "light" || e.k === "write") && typeof e.level !== "number") { unusableCount++; continue; }
+    usableEvents.push(e);
+  }
+
   const dayStartMs = dayStart.getTime();
   const nowMs = now.getTime();
 
   // -- presence lane: filled where occupied/overridden, ticks on raw edges --
-  const { occupied, overridden } = intervalsFromStates(historyEvents, dayStart, now);
-  const presenceTicks = historyEvents.filter(e => {
+  const { occupied, overridden } = intervalsFromStates(usableEvents, dayStart, now);
+  const presenceTicks = usableEvents.filter(e => {
     if (!e || e.k !== "presence" || e.on !== true) return false;
     const t = new Date(e.t).getTime();
     return !isNaN(t) && t >= dayStartMs && t <= nowMs;
@@ -1212,8 +1316,8 @@ function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone) {
   for (const item of lightsArr) {
     const deviceId = parseInt(item.id, 10);
     if (isNaN(deviceId)) continue;
-    const intervals = levelIntervals(historyEvents, deviceId, dayStart, now, null);
-    const writeTicks = historyEvents.filter(e => {
+    const intervals = levelIntervals(usableEvents, deviceId, dayStart, now);
+    const writeTicks = usableEvents.filter(e => {
       if (!e || e.k !== "write" || e.id !== deviceId) return false;
       const t = new Date(e.t).getTime();
       return !isNaN(t) && t >= dayStartMs && t <= nowMs;
@@ -1244,27 +1348,40 @@ function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone) {
   }
 
   // -- marks lane: override spans, off-duty-bright glyphs, gap markers --
-  const overrideEvents = historyEvents.filter(e => e && e.k === "override");
+  // `usableEvents` already guarantees a parseable `t` on every event, so the
+  // sort below never compares against NaN (undefined order); an `end` with
+  // no open `start` to close is a real pairing problem, not a shape one, and
+  // is counted here rather than by the general pass above.
+  const overrideEvents = usableEvents.filter(e => e.k === "override");
   const overrideSpans = [];
   let openOverride = null;
   for (const ev of overrideEvents.slice().sort((a, b) => new Date(a.t) - new Date(b.t))) {
-    if (ev.phase === "start") openOverride = ev;
-    else if (ev.phase === "end" && openOverride) {
-      overrideSpans.push({ start: openOverride.t, end: ev.t, device: openOverride.device });
-      openOverride = null;
+    if (ev.phase === "start") {
+      openOverride = ev;
+    } else if (ev.phase === "end") {
+      if (openOverride) {
+        overrideSpans.push({ start: openOverride.t, end: ev.t, device: openOverride.device });
+        openOverride = null;
+      } else {
+        unusableCount++;
+      }
     }
   }
   if (openOverride) overrideSpans.push({ start: openOverride.t, end: null, device: openOverride.device });
 
-  const offdutyBright = historyEvents.filter(e => e && e.k === "offduty" && e.cause === "bright");
-  const gaps = historyEvents.filter(e => e && e.k === "gap");
+  const offdutyBright = usableEvents.filter(e => e.k === "offduty" && e.cause === "bright");
+  const gaps = usableEvents.filter(e => e.k === "gap");
 
   wrap.appendChild(
     tlLane("Marks", "tl-marks", track => {
       for (const span of overrideSpans) {
         const startMs = new Date(span.start).getTime();
         const endMs = span.end ? new Date(span.end).getTime() : nowMs;
-        if (isNaN(startMs) || endMs < dayStartMs || startMs > nowMs) continue;
+        // `isNaN(endMs)` guards a span whose `end` string is present but
+        // will not parse -- without it `Math.min(endMs, nowMs)` and every
+        // percentage derived from it below become NaN, rendering a
+        // zero/garbled-width mark instead of skipping it.
+        if (isNaN(startMs) || isNaN(endMs) || endMs < dayStartMs || startMs > nowMs) continue;
         const clampedStart = Math.max(startMs, dayStartMs);
         const clampedEnd = Math.min(endMs, nowMs);
         const el = document.createElement("div");
@@ -1316,13 +1433,24 @@ function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone) {
   }
   wrap.appendChild(ticks);
 
-  const stats = statsFor(historyEvents, lightsArr.map(it => parseInt(it.id, 10)).filter(n => !isNaN(n)), dayStart, now);
+  if (unusableCount > 0) {
+    const note = document.createElement("div");
+    note.className = "tl-note";
+    note.textContent = `${unusableCount} history event${unusableCount === 1 ? "" : "s"} could not be read`;
+    wrap.appendChild(note);
+  }
+
+  const stats = statsFor(usableEvents, lightsArr.map(it => parseInt(it.id, 10)).filter(n => !isNaN(n)), dayStart, now);
   wrap.appendChild(buildStatsRow(stats));
 
   return wrap;
 }
 
+// `totalMinutes == null` renders "—": "nothing is known" (no lights
+// configured for this zone) must never look like "zero minutes" (lights
+// configured, genuinely never on).
 function fmtMinutes(totalMinutes) {
+  if (totalMinutes == null) return "—";
   const h = Math.floor(totalMinutes / 60);
   const m = Math.round(totalMinutes % 60);
   return `${h}h ${m}m`;
@@ -1334,6 +1462,7 @@ function buildStatsRow(stats) {
 
   const onWhileEmptyWarn = stats.onWhileEmptyMinutes > 15;
   const hereOffWarn = stats.hereLightsOffMinutes > 5;
+  const cyclesText = stats.cycles == null ? "— on/off cycles" : `${stats.cycles} on/off cycle${stats.cycles === 1 ? "" : "s"}`;
 
   const parts = [
     `occupied ${fmtMinutes(stats.occupiedMinutes)}`,
@@ -1345,8 +1474,12 @@ function buildStatsRow(stats) {
       ? { text: `here with lights off ${fmtMinutes(stats.hereLightsOffMinutes)}`, warn: true }
       : `here with lights off ${fmtMinutes(stats.hereLightsOffMinutes)}`,
     `${stats.overrideCount} override${stats.overrideCount === 1 ? "" : "s"}`,
-    `${stats.cycles} on/off cycle${stats.cycles === 1 ? "" : "s"}`,
+    cyclesText,
   ];
+  if (stats.unknownLights && stats.unknownLights.length > 0) {
+    const n = stats.unknownLights.length;
+    parts.push({ text: `${n} light${n === 1 ? "" : "s"} unknown`, warn: true });
+  }
 
   parts.forEach((part, i) => {
     if (i > 0) row.appendChild(document.createTextNode(" · "));
@@ -1530,11 +1663,13 @@ function buildFooter(dev, s) {
 // every card for the header's "N lights off target" / "N lights unknown".
 // `historyZones` is the history file's `zones` object (id -> {events}), or
 // null when the file could not be fetched/parsed at all -- see
-// `buildTimeline`'s own handling of "this zone has no entry" vs "there is
-// no history data to look one up in", which read as the same "unavailable"
-// note but are worth distinguishing in a comment: a zone with no entry yet
-// (brand new, or nothing has happened) is not a fetch failure.
-function buildCard(dev, historyZones, historyErrorMsg) {
+// `buildTimeline`'s own handling of the two DIFFERENT things that can be
+// missing: a fetch/parse failure (the whole file unavailable, `historyZones`
+// itself null -- the "history unavailable" note) versus a readable file that
+// simply has no entry for THIS zone yet (brand new, or nothing has happened
+// -- the much quieter "no history for this zone yet" note, computed below as
+// `noEntryYet` and passed through).
+function buildCard(dev, historyZones, historyErrorMsg, historyStatus, historyGeneratedAt) {
   const hasStates = !!(dev.states && Object.keys(dev.states).length);
   const s = dev.states || {};
   const offFlag = isOff(dev);
@@ -1567,7 +1702,11 @@ function buildCard(dev, historyZones, historyErrorMsg) {
   const { items: lightsForTimeline } = parseDesired(s.desired_summary);
   const zoneEntry = historyZones ? historyZones[zoneName(dev)] : null;
   const historyEvents = historyZones ? (zoneEntry && Array.isArray(zoneEntry.events) ? zoneEntry.events : []) : null;
-  card.appendChild(buildTimeline(s, historyEvents, historyErrorMsg, lightsForTimeline, zoneName(dev)));
+  const noEntryYet = !!historyZones && !zoneEntry;
+  card.appendChild(buildTimeline(
+    s, historyEvents, historyErrorMsg, lightsForTimeline, zoneName(dev),
+    historyStatus, historyGeneratedAt, noEntryYet
+  ));
 
   const { el: lightsEl, mismatchCount, unknownCount } = buildLightsSection(s);
   card.appendChild(lightsEl);
@@ -1629,11 +1768,15 @@ function render(all) {
     return rankDiff !== 0 ? rankDiff : zoneName(a).localeCompare(zoneName(b));
   });
 
+  const historyStatus = ctrl && ctrl.states ? ctrl.states.history_status : null;
+
   grid.textContent = "";
   let totalMismatches = 0;
   let totalUnknowns = 0;
   for (const z of zones) {
-    const { el, mismatchCount, unknownCount } = buildCard(z, historyZones, historyErrorMsg);
+    const { el, mismatchCount, unknownCount } = buildCard(
+      z, historyZones, historyErrorMsg, historyStatus, historyGeneratedAt
+    );
     totalMismatches += mismatchCount;
     totalUnknowns += unknownCount;
     grid.appendChild(el);
@@ -1659,32 +1802,56 @@ function onPollOk() {
 // a slow or hanging fetch cannot stack overlapping requests either.
 let historyZones = null;      // parsed `zones` object from the file, or null if unavailable
 let historyErrorMsg = null;   // why, when historyZones is null
+let historyGeneratedAt = null; // the file's own `generated_at`, or null if unavailable
 let historyRenderKey = "";    // folded into render()'s dedupe key so a history-only change still redraws
 let historyApi = null;
 let lastDevicesPayload = null;
 let historyPollInFlight = false;
+
+// The only version this page knows how to read (history.py's `VERSION`).
+const HISTORY_FILE_VERSION = 1;
 
 async function pollHistoryOnce() {
   if (!historyApi || historyPollInFlight) return;
   historyPollInFlight = true;
   try {
     const data = await historyApi.getHistory();
-    if (data && typeof data === "object" && data.zones && typeof data.zones === "object") {
+    if (data && typeof data === "object" && data.version !== HISTORY_FILE_VERSION) {
+      historyZones = null;
+      historyGeneratedAt = null;
+      historyErrorMsg = `history file is version ${data.version}; this page reads version ${HISTORY_FILE_VERSION}`;
+    } else if (data && typeof data === "object" && data.zones && typeof data.zones === "object") {
       historyZones = data.zones;
+      historyGeneratedAt = typeof data.generated_at === "string" ? data.generated_at : null;
       historyErrorMsg = null;
     } else {
       historyZones = null;
+      historyGeneratedAt = null;
       historyErrorMsg = "the history file did not contain a readable zones object";
     }
   } catch (err) {
     historyZones = null;
-    historyErrorMsg = (err && err.message) || "fetch failed";
+    historyGeneratedAt = null;
+    historyErrorMsg = (err && err.status === 404)
+      ? "no history file yet — the plugin writes it within 30 s of the first event"
+      : (err && err.message) || "fetch failed";
   } finally {
     historyPollInFlight = false;
-    historyRenderKey = JSON.stringify(historyZones) + "|" + historyErrorMsg;
-    if (lastDevicesPayload) {
-      lastRenderedJson = null; // force the next render() to rebuild
-      render(lastDevicesPayload);
+    // Only reset the render gate (and re-render) when something the
+    // timeline actually reads has changed -- previously this ran
+    // unconditionally on every poll, forcing a full DOM rebuild every 5 s
+    // even on a perfectly quiet house.
+    const key = JSON.stringify(historyZones) + "|" + historyErrorMsg + "|" + historyGeneratedAt;
+    if (key !== historyRenderKey) {
+      historyRenderKey = key;
+      if (lastDevicesPayload) {
+        lastRenderedJson = null; // force the next render() to rebuild
+        try {
+          render(lastDevicesPayload);
+        } catch (e) {
+          showErr("timeline render failed: " + e.message);
+        }
+      }
     }
   }
 }

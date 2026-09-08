@@ -1324,6 +1324,14 @@ def test_a_light_report_produces_exactly_one_history_event():
     assert len(events) == 1
     assert events[0] == {"t": "2026-09-04T19:00:00", "k": "light", "id": 201, "level": 60}
 
+    # A second callback that changes nothing about what 201 reports (still
+    # 60) must not produce a second event -- `light_reported` gates on
+    # whether the states dict actually moved, and `append_light`'s own
+    # per-device dedupe is a second, independent gate behind it.
+    engine.device_updated(*light(201, before=60, after=60), clock.at(seconds=1))
+    events = [e for e in history.zones[zone.name].events if e["k"] == "light"]
+    assert len(events) == 1
+
 
 def test_a_transition_produces_exactly_one_state_history_event():
     """Kills: recording a state event on every evaluation rather than only
@@ -1455,3 +1463,129 @@ def test_an_engine_with_no_history_sink_never_touches_it():
     engine.device_updated(*presence(101, False, True), clock.now)
     engine.tick(clock.now)  # must not raise
     assert engine.history is None
+
+
+class RaisingHistory:
+    """A `History` stand-in whose every `record_*` call raises. Used to pin
+    that a recording failure can never reach the caller -- see
+    `Engine._record` -- rather than merely asserting the method exists."""
+
+    def record_state(self, *a, **k):
+        raise RuntimeError("boom: record_state")
+
+    def record_presence(self, *a, **k):
+        raise RuntimeError("boom: record_presence")
+
+    def record_light(self, *a, **k):
+        raise RuntimeError("boom: record_light")
+
+    def record_write(self, *a, **k):
+        raise RuntimeError("boom: record_write")
+
+    def record_override(self, *a, **k):
+        raise RuntimeError("boom: record_override")
+
+    def record_offduty(self, *a, **k):
+        raise RuntimeError("boom: record_offduty")
+
+    def forget(self, *a, **k):
+        raise RuntimeError("boom: forget")
+
+
+def test_a_light_recording_failure_cannot_skip_the_override_rule():
+    """Kills: recording a light's report before the override rule runs
+    (R1) -- if `history.record_light` raised there and the raise escaped,
+    it would take the whole `device_updated` callback down before
+    `is_manual_override` ever ran, silently disabling override detection
+    for that event and every one after it on the same callback."""
+    history = RaisingHistory()
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, _changed = build(commander, history=history)
+    make_device(101, "relay", onState=False)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+    assert zone.state is ZoneState.OCCUPIED, "precondition: the zone has a desired level to move off"
+
+    now = clock.at(seconds=5)
+    apply_level(make_device(201, "dimmer", brightness=5), 5)
+    # Must not raise, and the override must still be detected even though
+    # `history.record_light` (called first, for whatever the light actually
+    # reports) raises on every call.
+    edges = engine.device_updated(*light(201, 60, 5), now)
+    assert any(e.kind == "override" for e in edges)
+
+
+def test_a_recording_failure_in_run_zone_does_not_block_the_command_or_notify():
+    """Kills: letting a raise from `_record_transition`/`_record_commands`
+    stop `_run_zone` from extending `commands`, recording the command sent,
+    or notifying -- a history bug must never be able to leave a zone's
+    Indigo device states or persisted state behind."""
+    history = RaisingHistory()
+    commander = RecordingCommander(apply=True)
+    engine, zone, clock, changed = build(commander, history=history)
+    make_device(101, "relay", onState=False)
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.device_updated(*presence(101, False, True), clock.now)
+    summary = engine.tick(clock.now)  # must not raise
+
+    assert summary.transitions, "the transition was still built and published"
+    assert summary.commands, "the commands were still sent despite the recording failure"
+    assert zone in changed, "the zone-changed callback still ran"
+
+
+def test_a_reload_that_removes_a_zone_forgets_its_history():
+    """Kills: leaving a departed zone's history in the store forever -- see
+    `test_a_reload_that_removes_a_zone_forgets_its_timers_and_its_backoff`
+    for the same property pinned for timers and backoff."""
+    history = History(logger=LOG)
+    engine, zone, clock, _changed = build(history=history)
+    make_device(101, "relay", onState=False)
+    make_device(302, "sensor", sensorValue=1200)
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+    assert "Kitchen" in history.zones
+
+    replacement = make_config(
+        [
+            make_zone_document(
+                name="Study",
+                lights=[203],
+                periods=[make_period("Evening", "18:00", "23:00", levels={"203": 60})],
+            )
+        ],
+        sun=engine.sun,
+    )
+    engine.reload(replacement, clock.at(seconds=5))
+
+    assert "Kitchen" not in history.zones
+
+
+def test_a_reload_that_removes_a_zone_survives_a_history_forget_failure():
+    """Kills: letting `History.forget` raising stop the reload from removing
+    the zone from `engine.zones` or from its other per-device bookkeeping."""
+    history = RaisingHistory()
+    engine, zone, clock, _changed = build(history=history)
+    make_device(101, "relay", onState=False)
+    make_device(302, "sensor", sensorValue=1200)
+    engine.device_updated(*presence(101, False, True), clock.now)
+    engine.tick(clock.now)
+
+    replacement = make_config(
+        [
+            make_zone_document(
+                name="Study",
+                lights=[203],
+                periods=[make_period("Evening", "18:00", "23:00", levels={"203": 60})],
+            )
+        ],
+        sun=engine.sun,
+    )
+    engine.reload(replacement, clock.at(seconds=5))  # must not raise
+
+    assert set(engine.zones) == {"Study"}

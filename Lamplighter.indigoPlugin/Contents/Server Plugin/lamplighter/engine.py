@@ -262,16 +262,8 @@ class Engine:
     def _light_changed(self, zone, previous_dev, current_dev, now):
         """The override rule, on the event, before anything can revert it (R1)."""
         device_id = current_dev.id
-        if self.history is not None and light_reported(previous_dev, current_dev):
-            # Independent of the override rule below and of the parked-device
-            # handling that follows: the history lane wants what the light
-            # ACTUALLY reports, whatever the engine goes on to decide about
-            # it. A device that cannot be read at all contributes no point
-            # rather than a guessed one (see light_level()).
-            level = light_level(current_dev)
-            if level is not None:
-                self.history.record_light(zone.name, now, device_id, level)
-        if self.reconciler.is_parked(device_id) and light_reported(previous_dev, current_dev):
+        reported = light_reported(previous_dev, current_dev)
+        if self.reconciler.is_parked(device_id) and reported:
             # A parked device (reconcile.py) is only retried on the wall
             # clock; a report from it that changes anything it says, however
             # it reads, is evidence it is alive again. Drop its ladder and
@@ -283,7 +275,7 @@ class Engine:
             # on the ladder it was parked to escape.
             self.reconciler.forget(device_id)
             self._wakes[zone.name] = now
-        if not is_manual_override(
+        override = is_manual_override(
             zone,
             previous_dev,
             current_dev,
@@ -291,7 +283,20 @@ class Engine:
             self.echo_book,
             self.config.echo_window_seconds,
             self.logger,
-        ):
+        )
+        if self.history is not None and reported:
+            # Deliberately AFTER the override rule and the parked-device
+            # handling above, not before: a recording failure here must
+            # never be able to skip R1 by raising ahead of it (`_record`
+            # already catches and logs, but the ordering is the real
+            # guarantee, not just the try/except). The history lane wants
+            # what the light ACTUALLY reports, whatever the engine decided
+            # about it. A device that cannot be read at all contributes no
+            # point rather than a guessed one (see light_level()).
+            level = light_level(current_dev)
+            if level is not None:
+                self._record(self.history.record_light, zone.name, now, device_id, level)
+        if not override:
             return None
         if zone.start_override(device_id, now) is None:
             # A never-lock zone noticed the change and keeps its levels.
@@ -319,7 +324,7 @@ class Engine:
         if not zone.ingest_presence(device_id, is_on, now):
             return None
         if self.history is not None:
-            self.history.record_presence(zone.name, now, device_id, "device", is_on)
+            self._record(self.history.record_presence, zone.name, now, device_id, "device", is_on)
         name = getattr(current_dev, "name", None) or f"device {device_id}"
         return self._mark_dirty(zone, f"presence: {name}", kind="presence")
 
@@ -410,7 +415,7 @@ class Engine:
         if not zone.ingest_presence(var_id, is_on, now):
             return None
         if self.history is not None:
-            self.history.record_presence(zone.name, now, var_id, "variable", is_on)
+            self._record(self.history.record_presence, zone.name, now, var_id, "variable", is_on)
         return self._mark_dirty(zone, f"presence: variable {label}", kind="presence")
 
     # --------------------------------------------------------- the worker thread
@@ -550,7 +555,7 @@ class Engine:
                     # this to show a room that was already occupied across a
                     # restart, rather than a lane that starts blank at the
                     # moment the plugin came back up.
-                    self.history.record_presence(zone.name, now, device_id, "device", True)
+                    self._record(self.history.record_presence, zone.name, now, device_id, "device", True)
             else:
                 # Deliberately NOT `ingest(..., False, ...)`. An "off" now
                 # stamps last_seen, so seeding the off devices would push the
@@ -578,7 +583,7 @@ class Engine:
                 # sensor, repeated here for a variable would be the same bug).
                 zone.ingest_presence(var_id, True, now)
                 if self.history is not None:
-                    self.history.record_presence(zone.name, now, var_id, "variable", True)
+                    self._record(self.history.record_presence, zone.name, now, var_id, "variable", True)
             else:
                 zone.presence.last_value[var_id] = False  # same as the device case above
 
@@ -590,7 +595,10 @@ class Engine:
             # restart instead of drawing nothing until the first report.
             # Best-effort: a light that cannot be read yet contributes
             # nothing here and picks up its first point on its next report,
-            # exactly like the presence and lux seeding above.
+            # like the lux seeding above (`read_lux` degrades quietly to
+            # `when_unreadable`) -- not like the presence seeding, which
+            # instead leaves the zone in `_unseeded` and flags it for a
+            # retry on the next tick when a lookup merely fails.
             for device_id in zone.config.lights:
                 try:
                     device = devices.get_device(device_id)
@@ -598,7 +606,7 @@ class Engine:
                     continue
                 level = light_level(device)
                 if level is not None:
-                    self.history.record_light(zone.name, now, device_id, level)
+                    self._record(self.history.record_light, zone.name, now, device_id, level)
 
         if readable:
             self.logger.debug(
@@ -793,6 +801,11 @@ class Engine:
             self._wakes.pop(departed, None)
             self._dirty.pop(departed, None)
             self._override_device.pop(departed, None)
+            if self.history is not None:
+                # Otherwise a zone removed from the file keeps its history in
+                # memory -- and in the written file -- forever, for as long
+                # as the plugin keeps running.
+                self._record(self.history.forget, departed)
             self.logger.info(f"Lamplighter: zone {departed!r} is no longer configured")
 
         self.zones = rebuilt
@@ -854,6 +867,24 @@ class Engine:
             self._dirty[zone.name] = cause
         return Edge(zone=zone.name, cause=cause, kind=kind)
 
+    def _record(self, fn, *args) -> None:
+        """Call a `History.record_*` method without letting a failure in it
+        reach the caller. A history-recording failure must cost the
+        timeline one missing event, never anything the caller does next --
+        `_light_changed` already orders around this instead of relying on
+        it alone (recording runs after the override rule, not before), and
+        `_run_zone` relies on it here so a raise from `_record_transition`
+        or `_record_commands` can never stop the command that was actually
+        sent from being published or notified.
+        """
+        try:
+            fn(*args)
+        except Exception:
+            self.logger.exception(
+                "Lamplighter: recording a history event raised; the timeline "
+                "will be missing it, the zone's decision was unaffected"
+            )
+
     def _record_transition(self, zone, now, transition) -> None:
         """The history events one :class:`~lamplighter.zone.Transition` implies.
 
@@ -866,26 +897,27 @@ class Engine:
         """
         if self.history is None:
             return
-        self.history.record_state(
-            zone.name, now, transition.to_state.value, transition.from_state.value, transition.cause
+        self._record(
+            self.history.record_state,
+            zone.name, now, transition.to_state.value, transition.from_state.value, transition.cause,
         )
         if transition.to_state is ZoneState.OVERRIDDEN:
             device = transition.inputs.get("override_device")
             self._override_device[zone.name] = device
-            self.history.record_override(zone.name, now, "start", device, transition.cause)
+            self._record(self.history.record_override, zone.name, now, "start", device, transition.cause)
         elif transition.from_state is ZoneState.OVERRIDDEN:
             device = self._override_device.pop(zone.name, None)
-            self.history.record_override(zone.name, now, "end", device, transition.cause)
+            self._record(self.history.record_override, zone.name, now, "end", device, transition.cause)
         if transition.to_state is ZoneState.OFF_DUTY:
             cause = transition.inputs.get("off_duty_cause")
             if cause:
-                self.history.record_offduty(zone.name, now, cause)
+                self._record(self.history.record_offduty, zone.name, now, cause)
 
     def _record_commands(self, zone, now, sent) -> None:
         if self.history is None:
             return
         for command in sent:
-            self.history.record_write(zone.name, now, command.device_id, command.level)
+            self._record(self.history.record_write, zone.name, now, command.device_id, command.level)
 
     def _notify(self, zone) -> None:
         if self.on_zone_changed is None:

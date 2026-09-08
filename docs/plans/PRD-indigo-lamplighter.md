@@ -310,8 +310,10 @@ Persisted across restarts: `presence_last_seen`, `override_*`, `dark`.
 
 A plugin-level `lamplighter_controller` device carries the global enable and
 the counters summed, so "all automation off" is one device. It also carries
-`config_status`, `config_loaded_at`, `config_zone_count` (the last
-successful configuration load) and `history_status` (§12: "ok", or the
+`config_status` (the most recent load attempt, successful or not),
+`config_loaded_at`, `config_zone_count` (the last successful configuration
+load only -- unmoved by a rejected edit, which is the whole signal: see
+`_record_config_loaded`) and `history_status` (§12: "ok", or the
 reason the status page timeline's data file could not be written --
 independent of `config_status`, since that file is data the plugin
 generates, not the configuration it is running).

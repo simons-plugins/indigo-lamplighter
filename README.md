@@ -248,10 +248,13 @@ level, and any override or off-duty-bright marks, with a "now" line and a
 stats row underneath (occupied time, lights-on time, lights left on with
 nobody there, time spent in the room with the lights off, overrides, on/off
 cycles) so hold times and lux thresholds can be tuned by looking. It reads
-from a rolling 48-hour history the plugin has been recording since install,
-written to `Web Assets/static/pages/lamplighter-history.json` independently
-of the page itself -- it keeps accumulating even if you hand-edit the
-bundled HTML.
+from a rolling 48-hour window kept in a history file the plugin has written
+since 2026.5.0 (older than that, and old enough to age out, both truncate
+the window rather than keep growing -- a `⋯` marker on the timeline says
+when that happened), written to
+`Web Assets/static/pages/lamplighter-history.json` independently of the
+page itself -- it keeps accumulating even if you hand-edit the bundled
+HTML.
 
 ![The status page on a phone](docs/images/lamplighter-status-page-phone.png)
 
