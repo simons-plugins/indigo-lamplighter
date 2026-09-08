@@ -273,6 +273,12 @@ _MISMATCH_CASES = [
     ("desired_on_actual_on_relay", "on", {"onState": True}, False),
     ("numeric_within_band_matches", "50", {"onState": True, "brightness": 52}, False),
     ("numeric_outside_band_mismatches", "50", {"onState": True, "brightness": 60}, True),
+    # The band is the engine's (compare.level_matches), not a flat ±3: 46 for
+    # 50 is inside the 5-point band and must NOT flag, 13 for 10 is outside
+    # the 1-point band and must, and 100 is exact so 98 must.
+    ("numeric_inside_engine_band_does_not_mismatch", "50", {"onState": True, "brightness": 46}, False),
+    ("numeric_low_target_has_a_one_point_band", "10", {"onState": True, "brightness": 13}, True),
+    ("numeric_full_is_exact", "100", {"onState": True, "brightness": 98}, True),
     ("numeric_dimmer_off_mismatches", "50", {"onState": False, "brightness": 0}, True),
     ("numeric_on_a_relay_uses_onish", "50", {"onState": True}, False),
     ("numeric_zero_on_a_relay_that_is_on_mismatches", "0", {"onState": True}, True),
@@ -339,3 +345,87 @@ def test_sortrank_table(tmp_path, name, states, off_flag, expected):
     """
     output = _run_page_logic(tmp_path, driver, name=f"sortrank_{name}.js")
     assert output["rank"] == expected
+
+
+# ------------------------------------------------- parsePeriodsToday (table-driven)
+
+def test_parseperiodstoday_the_literal_sentinel_sets_unavailable(tmp_path):
+    """The literal string "unavailable" (zone.py's `_periods_today_json`
+    sentinel for "the sun failed") must set `unavailable: true` with no
+    periods. Kills `unavailable: false` hardcoded in place of the
+    `raw === "unavailable"` comparison."""
+    driver = """
+        console.log(JSON.stringify({
+            result: parsePeriodsToday("unavailable"),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="ppt_unavailable.js")
+    assert output["result"] == {"periods": [], "unavailable": True, "malformed": False}
+
+
+def test_parseperiodstoday_an_empty_array_is_not_unavailable(tmp_path):
+    """A genuine, successfully-fetched empty period list ("[]") must read as
+    `unavailable: false` with an empty `periods` array -- distinct from the
+    "unavailable" sentinel above. Kills `unavailable: raw === ""` (or any
+    variant that treats a parseable empty array as unavailable)."""
+    driver = """
+        console.log(JSON.stringify({
+            result: parsePeriodsToday("[]"),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="ppt_empty_array.js")
+    assert output["result"] == {"periods": [], "unavailable": False, "malformed": False}
+
+
+def test_parseperiodstoday_a_valid_array_is_parsed_through(tmp_path):
+    """A well-formed JSON array of periods comes back parsed, untouched, with
+    both flags clear. Kills a mutation that drops the parsed value in favour
+    of an empty array even on success."""
+    driver = """
+        console.log(JSON.stringify({
+            result: parsePeriodsToday(JSON.stringify([{ name: "Evening", from: "18:00", to: "23:00", mode: "on_and_off" }])),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="ppt_valid_array.js")
+    assert output["result"] == {
+        "periods": [{"name": "Evening", "from": "18:00", "to": "23:00", "mode": "on_and_off"}],
+        "unavailable": False,
+        "malformed": False,
+    }
+
+
+def test_parseperiodstoday_garbage_is_flagged_malformed_not_silently_empty(tmp_path):
+    """Unparseable JSON (a truncated/corrupt `periods_today` value) must set
+    `malformed: true` and stay distinguishable from both the "unavailable"
+    sentinel and a genuine empty list -- an empty strip that looks identical
+    to "no periods today" would hide a real read failure from the viewer.
+    Kills collapsing the catch branch into the same `{ periods: [],
+    unavailable: false }` shape as the empty-array case."""
+    driver = """
+        console.log(JSON.stringify({
+            result: parsePeriodsToday("{not json"),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="ppt_malformed.js")
+    result = output["result"]
+    assert result == {"periods": [], "unavailable": False, "malformed": True}
+    # And it must actually be distinguishable from the genuine-empty-list case.
+    assert result != {"periods": [], "unavailable": False, "malformed": False}
+
+
+def test_builddaystrip_renders_a_note_for_malformed_period_data(tmp_path):
+    """`buildDayStrip` must surface `malformed` the same way it already
+    surfaces `unavailable` -- a `.strip-note` element, not a silently empty
+    strip -- so a corrupt `periods_today` value is visible on the card, not
+    indistinguishable from an ordinary "no periods configured" zone."""
+    driver = """
+        document.createElement = () => ({ className: "", textContent: "" });
+        const el = buildDayStrip({ period: "Evening", periods_today: "{not json" });
+        console.log(JSON.stringify({
+            className: el.className,
+            text: el.textContent,
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="builddaystrip_malformed.js")
+    assert output["className"] == "strip-note"
+    assert output["text"] == "period data unreadable"

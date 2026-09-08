@@ -839,6 +839,7 @@ def test_periods_today_publishes_unavailable_and_warns_once_when_the_sun_fails(c
         periods=[make_period("Dusk", "sunset-30m", "22:00", levels={"201": 50, "202": 50})]
     )
     zone.evaluate(NOW, "setup")
+    working_sun = zone.sun
     zone.sun = BrokenSun()
 
     # `_periods_today_json` directly: `snapshot()` also resolves the active
@@ -855,6 +856,18 @@ def test_periods_today_publishes_unavailable_and_warns_once_when_the_sun_fails(c
     assert second == "unavailable"
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1  # warned once, not once per snapshot
+
+    # A failure must never be memoised: the same-day cache is only ever
+    # written on the success path (see `_periods_today_cache = (today, text)`
+    # above the exception), so restoring a working sun on the SAME date has
+    # to produce real JSON on the very next ask, not a cached "unavailable"
+    # ridden out until midnight. Mutant: caching `(today, "unavailable")` in
+    # the except branch.
+    zone.sun = working_sun
+    third = zone._periods_today_json(NOW)
+    assert third != "unavailable"
+    parsed = json.loads(third)
+    assert parsed and parsed[0]["name"] == "Dusk"
 
 
 # ------------------------------------------------------------ presence_inputs

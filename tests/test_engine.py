@@ -790,6 +790,31 @@ def test_a_presence_device_reporting_off_at_seeding_changes_nothing():
     assert zone.presence.last_value == {101: False}
 
 
+def test_a_presence_variable_reporting_false_at_seeding_changes_nothing():
+    """Same promise as the device twin above, for a presence VARIABLE:
+    seeding a variable that already reads "false" must not stamp last_seen,
+    but the reading is still remembered for the status page's presence
+    chips.
+
+    Kills: deleting the `else` branch in `Engine._seed_zone` that reads
+    `indigo.variables[...]` for a configured presence variable -- the zone
+    would stay permanently unseeded for that input instead of recording an
+    "off" reading.
+    """
+    import indigo
+
+    engine, zone, clock, _changed = build(presence_variables=[SIMON_HOME])
+    indigo.variables[SIMON_HOME] = indigo.Variable(SIMON_HOME, "SimonHome", "false")
+    make_device(201, "dimmer", brightness=0)
+    make_device(202, "dimmer", brightness=0)
+    make_device(302, "sensor", sensorValue=1200)
+
+    engine.seed_inputs(clock.now)
+
+    assert zone.presence.last_value == {SIMON_HOME: False}
+    assert zone.presence.last_seen is None
+
+
 def test_a_lookup_that_failed_at_seeding_is_retried_and_decides_nothing_meanwhile(monkeypatch):
     """A busy server must not cost a zone its evidence, or its future.
 

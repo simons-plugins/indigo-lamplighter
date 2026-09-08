@@ -455,9 +455,19 @@ function mismatch(desiredLevel, actualDevice) {
   if (isNumericLevel(desiredLevel)) {
     const target = parseInt(desiredLevel, 10);
     if (st.kind !== "dimmer") return (target > 0) !== st.on;
-    return Math.abs(st.brightness - target) > 3;
+    return !levelMatches(st.brightness, target);
   }
   return false;
+}
+
+// The engine's own R5 tolerance (compare.level_matches), ported verbatim so
+// the red dot never contradicts what the plugin will actually rewrite: a
+// band of max(1, ceil(10 % of target)) either side, with 0 and 100 exact.
+// A flat ±3 here would flag a group dimmer reading 46 for 50 that the
+// plugin has (rightly) left alone, and miss a 13 for 10 that it is chasing.
+function levelMatches(actual, target) {
+  if (target <= 0 || target >= 100) return actual === target;
+  return Math.abs(actual - target) <= Math.max(1, Math.ceil(target * 0.10));
 }
 
 function lightName(id) {
@@ -720,21 +730,33 @@ function buildFacts(s) {
 }
 
 function parsePeriodsToday(raw) {
-  if (raw === "unavailable" || raw === "" || raw == null) return { periods: [], unavailable: raw === "unavailable" };
+  if (raw === "unavailable" || raw === "" || raw == null) {
+    return { periods: [], unavailable: raw === "unavailable", malformed: false };
+  }
   try {
     const parsed = JSON.parse(raw);
-    return { periods: Array.isArray(parsed) ? parsed : [], unavailable: false };
+    return { periods: Array.isArray(parsed) ? parsed : [], unavailable: false, malformed: false };
   } catch (_) {
-    return { periods: [], unavailable: false };
+    // Distinct from a genuine "[]": the field held something, but it wasn't
+    // readable JSON, so an empty strip here would look identical to a zone
+    // with no periods configured today. Surface it the same way `unavailable`
+    // is surfaced, rather than swallowing it into a silent empty list.
+    return { periods: [], unavailable: false, malformed: true };
   }
 }
 
 function buildDayStrip(s) {
-  const { periods, unavailable } = parsePeriodsToday(s.periods_today);
+  const { periods, unavailable, malformed } = parsePeriodsToday(s.periods_today);
   if (unavailable) {
     const note = document.createElement("div");
     note.className = "strip-note";
     note.textContent = "period times unavailable";
+    return note;
+  }
+  if (malformed) {
+    const note = document.createElement("div");
+    note.className = "strip-note";
+    note.textContent = "period data unreadable";
     return note;
   }
   if (!periods.length) return null;
@@ -783,7 +805,7 @@ function buildDayStrip(s) {
 // Returns { el, mismatchCount } so the caller can roll mismatches up into
 // the header's "N lights off target" without re-parsing desired_summary.
 function buildLightsSection(s) {
-  const { items: lightsArr } = parseDesired(s.desired_summary);
+  const { items: lightsArr, unparsedCount } = parseDesired(s.desired_summary);
   let mismatchCount = 0;
 
   const wrap = document.createElement("div");
@@ -833,7 +855,12 @@ function buildLightsSection(s) {
   }
   wrap.appendChild(list);
 
-  offTarget.textContent = mismatchCount > 0 ? `${mismatchCount} off target` : "";
+  // Both counts are degradation signals and both must show: a desired_summary
+  // entry the page could not read is a light this card is silently missing.
+  const notes = [];
+  if (mismatchCount > 0) notes.push(`${mismatchCount} off target`);
+  if (unparsedCount > 0) notes.push(`${unparsedCount} unparsed`);
+  offTarget.textContent = notes.join(" · ");
   return { el: wrap, mismatchCount };
 }
 

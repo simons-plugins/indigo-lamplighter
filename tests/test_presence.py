@@ -70,6 +70,33 @@ def test_an_off_report_from_an_unknown_device_is_not_an_edge():
     assert Presence().update(999, False, NOW) is Edge.NONE
 
 
+def test_a_no_op_off_report_does_not_move_last_input_id():
+    """last_input_id names "the one that last mattered" -- an off report from
+    a device that was never on does not matter, so it must not steal that
+    slot from the input that actually last changed something.
+
+    Kills: setting ``last_input_id`` before the ``device_id not in
+    self.on_devices`` guard in the off branch of ``update``, so a no-op off
+    report overwrites it anyway.
+    """
+    presence = Presence()
+    presence.update(101, True, NOW)
+    assert presence.update(102, False, at(5)) is Edge.NONE
+    assert presence.last_input_id == 101
+
+
+def test_a_refreshed_report_does_not_move_last_input_id():
+    """REFRESHED is not an edge in the ``last_input_id`` sense either: a
+    second (or third) device reporting on while the room is already occupied
+    must not bump the "last one that mattered" away from the device that
+    actually activated it.
+    """
+    presence = Presence()
+    presence.update(101, True, NOW)
+    assert presence.update(103, True, at(5)) is Edge.REFRESHED
+    assert presence.last_input_id == 101
+
+
 def test_going_quiet_then_reporting_again_activates():
     presence = Presence()
     presence.update(101, True, NOW)
