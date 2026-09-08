@@ -273,3 +273,24 @@ def test_rebuild_drops_a_presence_device_the_edit_removed():
     after = persist.rebuild_zone(before, narrowed, at(minutes=1))
     assert after.presence.on_devices == set()
     assert after.presence.last_seen == NOW  # the hold is a fact about the room
+
+
+def test_rebuild_carries_the_status_pages_per_input_bookkeeping():
+    """last_value/last_input_id are not in the persisted record (they are
+    never written to disk), but a reload never stopped the plugin -- the
+    same reasoning as on_devices above applies, and the status page's
+    presence chips must not blank out on an edit to an unrelated zone."""
+    before = a_held_zone()
+    before.ingest_presence(101, True, NOW)
+    after = persist.rebuild_zone(before, a_zone().config, at(minutes=1))
+    assert after.presence.last_value == {101: True}
+    assert after.presence.last_input_id == 101
+
+
+def test_rebuild_drops_per_input_bookkeeping_for_a_removed_presence_device():
+    before = a_held_zone()
+    before.ingest_presence(101, True, NOW)
+    narrowed = a_zone(presence_devices=[102]).config
+    after = persist.rebuild_zone(before, narrowed, at(minutes=1))
+    assert after.presence.last_value == {}
+    assert after.presence.last_input_id is None

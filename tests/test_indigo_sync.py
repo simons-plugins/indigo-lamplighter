@@ -51,6 +51,9 @@ PRD_5_10_STATES = (
     "writes_today",
     "overrides_today",
     "last_trigger",
+    "off_duty_cause",
+    "periods_today",
+    "presence_inputs",
 )
 
 

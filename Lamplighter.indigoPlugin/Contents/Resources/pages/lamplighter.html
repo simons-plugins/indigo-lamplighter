@@ -10,20 +10,23 @@
 <style>
 :root{--bg:#f7f4ef;--card-bg:#fff;--text:#1d1a15;--text-secondary:#8a8378;--border:#e2dbcd;
 --accent:#c9822f;--on-color:#3a9d5c;--warn:#c9822f;--bad:#c1442c;--muted:#a39b8c;
---chip-bg:#efe9dc;--shadow:0 1px 3px rgba(0,0,0,.08)}
+--chip-bg:#efe9dc;--shadow:0 1px 3px rgba(0,0,0,.08);
+--band-on:rgba(58,157,92,.35);--band-off:var(--muted);--now-line:var(--text)}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#17140f;--card-bg:#241f18;
 --text:#f2ede2;--text-secondary:#a89f8f;--border:#3a342a;--accent:#e0a04b;--on-color:#4cb772;
---warn:#e0a04b;--bad:#e0654a;--muted:#6f6858;--chip-bg:#2e281f;--shadow:0 1px 3px rgba(0,0,0,.4)}}
+--warn:#e0a04b;--bad:#e0654a;--muted:#6f6858;--chip-bg:#2e281f;--shadow:0 1px 3px rgba(0,0,0,.4);
+--band-on:rgba(76,183,114,.35);--band-off:var(--muted);--now-line:var(--text)}}
 :root[data-theme="dark"]{--bg:#17140f;--card-bg:#241f18;--text:#f2ede2;--text-secondary:#a89f8f;
 --border:#3a342a;--accent:#e0a04b;--on-color:#4cb772;--warn:#e0a04b;--bad:#e0654a;--muted:#6f6858;
---chip-bg:#2e281f;--shadow:0 1px 3px rgba(0,0,0,.4)}
+--chip-bg:#2e281f;--shadow:0 1px 3px rgba(0,0,0,.4);
+--band-on:rgba(76,183,114,.35);--band-off:var(--muted);--now-line:var(--text)}
 *{box-sizing:border-box}
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;
 background:var(--bg);color:var(--text);font-size:17px;-webkit-font-smoothing:antialiased;
 padding:16px;padding-top:max(16px,env(safe-area-inset-top));
 padding-bottom:max(32px,env(safe-area-inset-bottom));
 padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
-.wrap{max-width:1100px;margin:0 auto}
+.wrap{max-width:1200px;margin:0 auto}
 h1{font-size:28px;margin:0 0 4px;letter-spacing:-.02em}
 .updated{font-size:13px;color:var(--text-secondary);margin-bottom:14px;font-variant-numeric:tabular-nums}
 .banner{border-radius:10px;padding:12px 14px;font-size:15px;line-height:1.4;margin-bottom:14px;display:none}
@@ -34,10 +37,13 @@ margin-bottom:16px;display:flex;flex-wrap:wrap;gap:10px 20px;align-items:center;
 color:var(--text-secondary)}
 .hdr b{color:var(--text);font-weight:600}
 .hdr .sep{color:var(--border)}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
-.card{background:var(--card-bg);border-radius:14px;box-shadow:var(--shadow);padding:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;align-items:stretch}
+.card{background:var(--card-bg);border-radius:14px;box-shadow:var(--shadow);padding:16px;
+display:flex;flex-direction:column}
 .card.disabled{opacity:.6}
-.crow{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:8px}
+
+/* ── title row + chip ─────────────────────────────────────────────────── */
+.crow{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
 .zname{font-size:18px;font-weight:600;letter-spacing:-.01em}
 .chip{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;
 padding:4px 10px;border-radius:999px;white-space:nowrap;flex:0 0 auto}
@@ -47,23 +53,87 @@ padding:4px 10px;border-radius:999px;white-space:nowrap;flex:0 0 auto}
 .chip.offduty{background:var(--chip-bg);color:var(--muted)}
 .chip.disabled{background:var(--chip-bg);color:var(--muted)}
 .chip.unknown{background:var(--chip-bg);color:var(--muted)}
-.facts{font-size:13px;color:var(--text-secondary);margin-bottom:10px;line-height:1.5}
-.facts span{white-space:nowrap}
-.facts span+span:before{content:" · "}
-.explain{font-size:14px;line-height:1.5;color:var(--text);margin-bottom:12px}
-.foot{border-top:1px solid var(--border);padding-top:10px;font-size:13px}
+.subline{font-size:12px;color:var(--text-secondary);margin-top:2px;line-height:1.4}
+
+/* ── verdict: the most prominent line on the card ────────────────────── */
+.verdict{font-size:16px;line-height:1.4;font-weight:500;color:var(--text);margin:10px 0}
+
+/* ── facts grid ───────────────────────────────────────────────────────── */
+.facts{display:grid;grid-template-columns:repeat(4,1fr);gap:10px 12px;margin-bottom:12px}
+.fact-label{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+color:var(--text-secondary);margin-bottom:2px}
+.fact-value{font-size:14px;color:var(--text);line-height:1.3;word-break:break-word}
+
+/* ── day strip ────────────────────────────────────────────────────────── */
+.strip-wrap{margin-bottom:12px}
+.strip{position:relative;height:26px;border-radius:6px;background:var(--chip-bg);overflow:hidden}
+.band{position:absolute;top:0;bottom:0;display:flex;align-items:center;justify-content:center;
+font-size:10px;font-weight:600;color:var(--text);overflow:hidden;white-space:nowrap;
+border-left:1px solid var(--card-bg);border-right:1px solid var(--card-bg)}
+.band.on_and_off{background:var(--band-on)}
+.band.off_only{background:repeating-linear-gradient(45deg,var(--band-off) 0,var(--band-off) 3px,
+transparent 3px,transparent 7px);opacity:.55}
+.band.active{border:2px solid var(--accent);border-radius:3px}
+/* A pill behind the name keeps it legible over the off_only hatching and
+   where the now-line crosses a band. */
+.band .blabel{background:var(--card-bg);color:var(--text);padding:1px 7px;border-radius:999px;
+opacity:.92;position:relative;z-index:1}
+.now-line{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--now-line);z-index:2}
+.ticks{display:flex;justify-content:space-between;font-size:10px;color:var(--text-secondary);
+margin-top:3px;font-variant-numeric:tabular-nums}
+.strip-note{font-size:12px;color:var(--text-secondary);margin-bottom:12px}
+
+/* ── lights list ──────────────────────────────────────────────────────── */
+.section-label{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;
+color:var(--text-secondary);display:flex;justify-content:space-between;align-items:baseline;
+margin-bottom:6px}
+.section-label .off-target{color:var(--bad);font-weight:700;text-transform:none;letter-spacing:0}
+.lights{list-style:none;margin:0 0 12px;padding:0;font-size:13px}
+.lights li{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)}
+.lights li:last-child{border-bottom:none}
+.lights .dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:transparent}
+.lights li.mismatch .dot{background:var(--bad)}
+.lights .lname{flex:1 1 auto;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap}
+.lights li.mismatch .lname{color:var(--text)}
+.lights .ldesired,.lights .lactual{font-variant-numeric:tabular-nums;white-space:nowrap;font-size:12px}
+.lights .ldesired{color:var(--text-secondary)}
+.lights .lactual{color:var(--text-secondary)}
+.lights li.mismatch .lactual{color:var(--bad);font-weight:600}
+.lights .larrow{color:var(--text-secondary);font-size:11px}
+
+/* ── presence chips ───────────────────────────────────────────────────── */
+.presence-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.pchip{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--border);
+color:var(--text-secondary);white-space:nowrap}
+.pchip.on{background:var(--on-color);border-color:var(--on-color);color:#fff}
+.pchip.off{background:transparent}
+.pchip.unknown{background:transparent;border-style:dashed}
+.pchip .last{font-weight:700}
+
+/* ── footer ───────────────────────────────────────────────────────────── */
+.foot{border-top:1px solid var(--border);padding-top:10px;font-size:13px;margin-top:auto;
+display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:6px 10px}
 .disclosure{background:none;border:none;color:var(--accent);font:inherit;font-size:13px;font-weight:600;
-padding:6px 0;cursor:pointer;min-height:32px;display:flex;align-items:center;gap:6px;width:100%;text-align:left}
+padding:6px 0;cursor:pointer;min-height:32px;display:flex;align-items:center;gap:6px}
 .disclosure .tri{display:inline-block;transition:transform .15s ease;font-size:11px}
 .disclosure[aria-expanded="true"] .tri{transform:rotate(90deg)}
 @media (prefers-reduced-motion:reduce){.disclosure .tri{transition:none}}
-.lights{list-style:none;margin:2px 0 10px;padding:0;font-size:13px}
-.lights li{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border)}
-.lights li:last-child{border-bottom:none}
-.lights .lvl{color:var(--text-secondary);font-variant-numeric:tabular-nums}
-.counters{color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.counters{color:var(--text-secondary);font-variant-numeric:tabular-nums;white-space:nowrap}
+.explain{font-size:13px;line-height:1.5;color:var(--text-secondary);margin:8px 0 0;
+font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;
+word-break:break-word;width:100%}
 .empty{color:var(--text-secondary);text-align:center;padding:40px 16px;font-size:15px}
 [hidden]{display:none!important}
+
+@media (max-width:640px){
+  .grid{grid-template-columns:1fr}
+  .facts{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:480px){
+  .band span.blabel{display:none}
+  .ticks{font-size:9px}
+}
 </style>
 </head>
 <body>
@@ -268,11 +338,14 @@ const PLUGIN_ID = "com.simons-plugins.indigo-lamplighter";
 const ZONE_TYPE = "lamplighter_zone";
 const CTRL_TYPE = "lamplighter_controller";
 const NAME_PREFIX = /^Lamplighter - /;
+const MINUTES_PER_DAY = 1440;
+const MANUAL_LOCK_DEVICE_ID = "-1";
 
 const $ = id => document.getElementById(id);
 let indigo = null, watcher = null;
 let openIds = new Set();         // disclosures the user has opened, kept open across re-renders
 let deviceNames = {};            // id -> name, rebuilt whenever render() rebuilds the DOM (payload changed)
+let deviceById = {};             // id -> full device object, for reading actual state (brightness/onState)
 let lastRenderedJson = null;     // gates the DOM rebuild only; reset to null on any error so the next success rebuilds -- see render()
 let authFailed = false;
 
@@ -297,44 +370,17 @@ function zoneName(dev) {
   return (dev.name || "").replace(NAME_PREFIX, "");
 }
 
-function stateChip(dev, s) {
-  if (isOff(dev)) return { cls: "disabled", label: "DISABLED" };
-  const explain = s.explain || "";
-  switch (s.state) {
-    case "occupied": return { cls: "occupied", label: "OCCUPIED" };
-    case "vacant": return { cls: "vacant", label: "VACANT" };
-    case "overridden": {
-      let until = "";
-      if (s.override_expires) until = fmtTime(s.override_expires) || "?";
-      return { cls: "overridden", label: "OVERRIDDEN" + (until ? " · until " + until : "") };
-    }
-    case "off_duty": {
-      let extra = "";
-      if (explain.includes("bright")) extra = " · bright";
-      else if (explain.includes("disabled")) extra = " · disabled";
-      return { cls: "offduty", label: "OFF DUTY" + extra };
-    }
-    default: return { cls: "vacant", label: (s.state || "UNKNOWN").toUpperCase() };
-  }
+// A device's on/off arrives at the top level as `onState` over the REST API;
+// `onOffState` only exists inside `states`. A zone that is off is disabled.
+// The `states.onOffState` fallback covers a payload that omits `onState` (a
+// device still starting); it deliberately never overrides a present `onState`.
+function isOff(dev) {
+  if (dev.onState === false) return true;
+  const st = dev.states || {};
+  return dev.onState == null && st.onOffState === false;
 }
 
-function presenceFact(s) {
-  if (s.presence_active === true) return "here";
-  if (s.presence_last_seen) return "hold, last seen " + fmtTime(s.presence_last_seen);
-  if (s.presence_active == null) return "presence unknown";
-  return "never seen";
-}
-
-function luxFact(s) {
-  if (s.dark == null) return "lux unknown";
-  const dark = s.dark === true;
-  const label = dark ? "dark" : "bright";
-  if (s.lux !== "" && s.lux != null) {
-    const n = Math.round(parseFloat(s.lux));
-    if (!isNaN(n)) return label + " (" + n + " lx)";
-  }
-  return label;
-}
+// ── parsing helpers (pure — table-driven-tested under node) ─────────────
 
 function parseDesired(summary) {
   // "144694384=100, 772478931=50, ..." -> { items: [{id, level}], unparsedCount }
@@ -359,8 +405,211 @@ function levelLabel(level) {
   return level;
 }
 
+function isNumericLevel(level) {
+  const n = parseInt(level, 10);
+  return !isNaN(n) && String(n) === String(level);
+}
+
+// Does this desired level mean "the light should be showing some light at
+// all"? Used by verdictFor() to decide between "nothing to switch" and
+// "lights at X levels", and between plain "off" and "dimmed to vacant
+// levels" — the same question in both states, just a different period plan.
+function levelIsOnish(level) {
+  if (level === "on") return true;
+  if (isNumericLevel(level)) return parseInt(level, 10) > 0;
+  return false;
+}
+
+// This device's actual state, read the same way for every desired level:
+// { kind: "dimmer"|"relay"|"unknown", on, brightness }. `brightness` is only
+// meaningful for a dimmer. A device absent from the device list (gone, or a
+// lookup that failed — the zone's own `explain` names which) reads "unknown"
+// rather than guessing at "off", which would hide the very degradation R15
+// asks every part of this plugin to say out loud.
+function actualState(dev) {
+  if (!dev) return { kind: "unknown" };
+  if (typeof dev.brightness === "number") {
+    return { kind: "dimmer", on: !!dev.onState, brightness: dev.onState ? dev.brightness : 0 };
+  }
+  return { kind: "relay", on: isOff(dev) ? false : !!dev.onState };
+}
+
+function actualLabel(dev) {
+  const st = actualState(dev);
+  if (st.kind === "unknown") return "unknown";
+  if (st.kind === "dimmer") return st.on ? `${st.brightness} %` : "off";
+  return st.on ? "on" : "off";
+}
+
+// Is `desiredLevel` for this device visibly different from what it is
+// actually doing right now? `"leave"` (the plugin never writes this device)
+// and an unresolved device (nothing to compare against) never mismatch —
+// see the module docstring on why an unknown must not read as a mismatch.
+function mismatch(desiredLevel, actualDevice) {
+  if (desiredLevel == null || desiredLevel === "leave") return false;
+  const st = actualState(actualDevice);
+  if (st.kind === "unknown") return false;
+
+  if (desiredLevel === "off") return st.kind === "dimmer" ? st.brightness > 0 : st.on === true;
+  if (desiredLevel === "on") return st.kind === "dimmer" ? st.brightness <= 0 : st.on === false;
+  if (isNumericLevel(desiredLevel)) {
+    const target = parseInt(desiredLevel, 10);
+    if (st.kind !== "dimmer") return (target > 0) !== st.on;
+    return Math.abs(st.brightness - target) > 3;
+  }
+  return false;
+}
+
 function lightName(id) {
   return deviceNames[id] || ("#" + id);
+}
+
+// "HH:MM" -> minutes since local midnight. Never throws: a value that will
+// not parse reads as 0 rather than NaN poisoning the band's position.
+function timeToMinutes(hhmm) {
+  const m = /^([0-9]{1,2}):([0-9]{2})$/.exec(String(hhmm || ""));
+  if (!m) return 0;
+  return (parseInt(m[1], 10) * 60 + parseInt(m[2], 10)) % MINUTES_PER_DAY;
+}
+
+// One period's { from, to } (both "HH:MM") as one or two horizontal bar
+// segments, each `{ startPct, widthPct }` of the 24-hour strip. Two segments
+// come out when `to <= from` — the period crosses midnight (periods_today
+// publishes it exactly that way; see zone.py's `_periods_today_json`) — so
+// the wrap always draws as an end-of-day piece plus a start-of-day piece
+// rather than one backwards or one full-width band.
+function bandSegments(period) {
+  const from = timeToMinutes(period.from);
+  const to = timeToMinutes(period.to);
+  if (to > from) {
+    return [{ startPct: (from / MINUTES_PER_DAY) * 100, widthPct: ((to - from) / MINUTES_PER_DAY) * 100 }];
+  }
+  const segments = [];
+  if (from < MINUTES_PER_DAY) {
+    segments.push({ startPct: (from / MINUTES_PER_DAY) * 100, widthPct: ((MINUTES_PER_DAY - from) / MINUTES_PER_DAY) * 100 });
+  }
+  if (to > 0) {
+    segments.push({ startPct: 0, widthPct: (to / MINUTES_PER_DAY) * 100 });
+  }
+  return segments;
+}
+
+// Sort key for "attention order": overridden first, then occupied, vacant,
+// off-duty, disabled last — ties broken by name at the call site. Table-
+// driven-tested directly against the (states, isOffFlag) inputs render()
+// already has on hand, rather than against a whole device object.
+function sortRank(states, isOffFlag) {
+  if (isOffFlag) return 4;
+  switch ((states || {}).state) {
+    case "overridden": return 0;
+    case "occupied": return 1;
+    case "vacant": return 2;
+    case "off_duty": return 3;
+    default: return 5; // no states yet / unrecognised — last, after disabled
+  }
+}
+
+// The chip: label and CSS class, for any zone state.
+function chipFor(states, isOffFlag) {
+  if (isOffFlag) return { cls: "disabled", label: "DISABLED" };
+  const s = states || {};
+  switch (s.state) {
+    case "occupied": return { cls: "occupied", label: "OCCUPIED" };
+    case "vacant": return { cls: "vacant", label: "VACANT" };
+    case "overridden": {
+      const until = fmtTime(s.override_expires);
+      return { cls: "overridden", label: "OVERRIDDEN" + (until ? " · until " + until : "") };
+    }
+    case "off_duty": {
+      const causeText = { bright: " · bright", no_period: " · no period", disabled: " · disabled" }[s.off_duty_cause] || "";
+      return { cls: "offduty", label: "OFF DUTY" + causeText };
+    }
+    default: return { cls: "vacant", label: (s.state || "UNKNOWN").toUpperCase() };
+  }
+}
+
+// The one-sentence verdict: the most prominent text on the card, built only
+// from states and the device list — never from parsing `explain`'s prose,
+// which is what the fork's card used to do.
+function verdictFor(states, isOffFlag) {
+  if (isOffFlag) return "Zone switched off in Indigo.";
+  const s = states || {};
+  const { items } = parseDesired(s.desired_summary);
+  const anyOnish = items.some(it => levelIsOnish(it.level));
+  const period = s.period || "";
+
+  switch (s.state) {
+    case "occupied":
+      return anyOnish
+        ? `Someone is here — lights at ${period || "this period's"} levels.`
+        : `Someone is here — nothing to switch in ${period || "this period"}.`;
+    case "vacant": {
+      const since = fmtTime(s.presence_last_seen);
+      return anyOnish
+        ? `Empty${since ? " since " + since : ""} — lights dimmed to vacant levels.`
+        : `Empty${since ? " since " + since : ""} — lights off.`;
+    }
+    case "overridden": {
+      const until = fmtTime(s.override_expires);
+      return `Changed by hand — holding whatever the lights are now until ${until || "it expires"}.`;
+    }
+    case "off_duty":
+      switch (s.off_duty_cause) {
+        case "bright": {
+          const n = (s.lux !== "" && s.lux != null) ? Math.round(parseFloat(s.lux)) : NaN;
+          return `Bright enough${!isNaN(n) ? ` (${n} lx)` : ""} — lights left off.`;
+        }
+        case "no_period": return "No period covers now — lights left alone.";
+        case "disabled": return "Zone disabled — lights left alone.";
+        default: return "Off duty — lights left alone.";
+      }
+    default: return "";
+  }
+}
+
+function presenceFact(s) {
+  if (s.presence_active === true) return "here";
+  if (s.presence_last_seen) return "last seen " + fmtTime(s.presence_last_seen);
+  return "never";
+}
+
+function lightFact(s) {
+  const dark = s.dark === true;
+  const label = s.dark == null ? "" : (dark ? "dark" : "bright");
+  if (s.lux !== "" && s.lux != null) {
+    const n = Math.round(parseFloat(s.lux));
+    if (!isNaN(n)) return label ? `${n} lx · ${label}` : `${n} lx`;
+  }
+  return label || "unknown";
+}
+
+function overrideOwnerLabel(s) {
+  if (s.override_device === "" || s.override_device == null) return "";
+  return String(s.override_device) === MANUAL_LOCK_DEVICE_ID ? "manual lock" : lightName(String(s.override_device));
+}
+
+function overrideFact(s) {
+  const owner = overrideOwnerLabel(s);
+  if (!owner) return "none";
+  const until = fmtTime(s.override_expires);
+  return until ? `${owner} until ${until}` : owner;
+}
+
+// Minutes remaining until `expiresIso`, recomputed fresh at call time so it
+// stays honest across a 5-second poll interval without the server sending
+// a new value. null when there is nothing to count down (no override, or an
+// unparseable timestamp) rather than a made-up 0.
+function minutesLeft(expiresIso, now = new Date()) {
+  if (!expiresIso) return null;
+  const exp = new Date(expiresIso);
+  if (isNaN(exp.getTime())) return null;
+  return Math.max(0, Math.round((exp.getTime() - now.getTime()) / 60000));
+}
+
+function presenceInputLabel(entry) {
+  if (entry.kind === "device") return lightName(String(entry.id));
+  if (entry.name) return "var " + String(entry.name).replace(/^variable /, "");
+  return "var " + entry.id;
 }
 
 // `parts` is a mix of plain strings (rendered as text) and
@@ -382,7 +631,7 @@ function addParts(hdr, parts) {
   hdr.appendChild(span);
 }
 
-function renderHeader(ctrl) {
+function renderHeader(ctrl, offTargetCount) {
   const hdr = $("hdr");
   if (!ctrl) { hdr.hidden = true; return; }
   const s = ctrl.states || {};
@@ -399,6 +648,9 @@ function renderHeader(ctrl) {
     { text: String(total) }, " zones (", { text: String(enabled) }, " enabled, ",
     { text: String(overridden) }, " overridden)",
   ]);
+  if (offTargetCount > 0) {
+    addParts(hdr, [{ text: `${offTargetCount} light${offTargetCount === 1 ? "" : "s"} off target`, style: "color:var(--bad)" }]);
+  }
   if (s.config_status) addParts(hdr, ["config: ", { text: s.config_status }]);
   const ev = s.evaluations_today != null ? s.evaluations_today : 0;
   const wr = s.writes_today != null ? s.writes_today : 0;
@@ -410,100 +662,238 @@ function renderHeader(ctrl) {
   if (s.config_loaded_at) addParts(hdr, ["loaded " + fmtTime(s.config_loaded_at)]);
 }
 
-// A device's on/off arrives at the top level as `onState` over the REST API;
-// `onOffState` only exists inside `states`. A zone that is off is disabled.
-// The `states.onOffState` fallback covers a payload that omits `onState` (a
-// device still starting); it deliberately never overrides a present `onState`.
-function isOff(dev) {
-  if (dev.onState === false) return true;
-  const st = dev.states || {};
-  return dev.onState == null && st.onOffState === false;
-}
+// ── card sections ─────────────────────────────────────────────────────
 
-function buildCard(dev) {
-  const hasStates = !!(dev.states && Object.keys(dev.states).length);
-  const s = dev.states || {};
-  const card = document.createElement("div");
-  card.className = "card" + (isOff(dev) ? " disabled" : "");
-  card.dataset.id = dev.id;
-
+function buildTitleRow(dev, s, offFlag) {
   const crow = document.createElement("div");
   crow.className = "crow";
   const nameEl = document.createElement("div");
   nameEl.className = "zname";
   nameEl.textContent = zoneName(dev);
-  const chipInfo = hasStates ? stateChip(dev, s) : { cls: "unknown", label: "UNKNOWN" };
+  const chipInfo = chipFor(s, offFlag);
   const chipEl = document.createElement("span");
   chipEl.className = "chip " + chipInfo.cls;
   chipEl.textContent = chipInfo.label;
   crow.appendChild(nameEl);
   crow.appendChild(chipEl);
-  card.appendChild(crow);
+  return crow;
+}
 
-  if (!hasStates) {
-    // A zone device that hasn't finished starting has no states at all yet --
-    // don't fabricate a period/lux/presence reading it never reported.
-    const notice = document.createElement("div");
-    notice.className = "explain";
-    notice.textContent = "no state reported (device not started?)";
-    card.appendChild(notice);
-    return card;
-  }
+function buildOverrideSubline(s) {
+  if (s.state !== "overridden") return null;
+  const owner = overrideOwnerLabel(s);
+  const since = fmtTime(s.persist_override_since);
+  const left = minutesLeft(s.override_expires);
+  const parts = [];
+  if (owner) parts.push(`taken by ${owner}`);
+  if (since) parts.push(`at ${since}`);
+  if (left != null) parts.push(`${left} min left`);
+  if (!parts.length) return null;
+  const div = document.createElement("div");
+  div.className = "subline";
+  div.textContent = parts.join(" · ");
+  return div;
+}
 
+function buildFacts(s) {
   const facts = document.createElement("div");
   facts.className = "facts";
-  const period = document.createElement("span");
-  period.textContent = s.period ? s.period : "no period";
-  const lux = document.createElement("span");
-  lux.textContent = luxFact(s);
-  const presence = document.createElement("span");
-  presence.textContent = presenceFact(s);
-  facts.appendChild(period); facts.appendChild(lux); facts.appendChild(presence);
-  card.appendChild(facts);
+  const rows = [
+    ["Period", s.period || "none"],
+    ["Light", lightFact(s)],
+    ["Presence", presenceFact(s)],
+    ["Override", overrideFact(s)],
+  ];
+  for (const [label, value] of rows) {
+    const cell = document.createElement("div");
+    const lbl = document.createElement("div");
+    lbl.className = "fact-label";
+    lbl.textContent = label;
+    const val = document.createElement("div");
+    val.className = "fact-value";
+    val.textContent = value;
+    cell.appendChild(lbl);
+    cell.appendChild(val);
+    facts.appendChild(cell);
+  }
+  return facts;
+}
 
-  const explain = document.createElement("div");
-  explain.className = "explain";
-  explain.textContent = s.explain || "";
-  card.appendChild(explain);
+function parsePeriodsToday(raw) {
+  if (raw === "unavailable" || raw === "" || raw == null) return { periods: [], unavailable: raw === "unavailable" };
+  try {
+    const parsed = JSON.parse(raw);
+    return { periods: Array.isArray(parsed) ? parsed : [], unavailable: false };
+  } catch (_) {
+    return { periods: [], unavailable: false };
+  }
+}
 
+function buildDayStrip(s) {
+  const { periods, unavailable } = parsePeriodsToday(s.periods_today);
+  if (unavailable) {
+    const note = document.createElement("div");
+    note.className = "strip-note";
+    note.textContent = "period times unavailable";
+    return note;
+  }
+  if (!periods.length) return null;
+
+  const wrap = document.createElement("div");
+  wrap.className = "strip-wrap";
+  const strip = document.createElement("div");
+  strip.className = "strip";
+
+  for (const period of periods) {
+    const isActive = period.name === s.period;
+    for (const seg of bandSegments(period)) {
+      const band = document.createElement("div");
+      band.className = "band " + (period.mode === "off_only" ? "off_only" : "on_and_off") + (isActive ? " active" : "");
+      band.style.left = seg.startPct + "%";
+      band.style.width = seg.widthPct + "%";
+      band.title = `${period.name} ${period.from}–${period.to} · ${period.mode}`;
+      if (seg.widthPct >= 12) {
+        const label = document.createElement("span");
+        label.className = "blabel";
+        label.textContent = period.name;
+        band.appendChild(label);
+      }
+      strip.appendChild(band);
+    }
+  }
+
+  const now = new Date();
+  const nowLine = document.createElement("div");
+  nowLine.className = "now-line";
+  nowLine.style.left = (((now.getHours() * 60 + now.getMinutes()) / MINUTES_PER_DAY) * 100) + "%";
+  strip.appendChild(nowLine);
+
+  wrap.appendChild(strip);
+  const ticks = document.createElement("div");
+  ticks.className = "ticks";
+  for (const h of ["00", "06", "12", "18", "24"]) {
+    const t = document.createElement("span");
+    t.textContent = h;
+    ticks.appendChild(t);
+  }
+  wrap.appendChild(ticks);
+  return wrap;
+}
+
+// Returns { el, mismatchCount } so the caller can roll mismatches up into
+// the header's "N lights off target" without re-parsing desired_summary.
+function buildLightsSection(s) {
+  const { items: lightsArr } = parseDesired(s.desired_summary);
+  let mismatchCount = 0;
+
+  const wrap = document.createElement("div");
+  const label = document.createElement("div");
+  label.className = "section-label";
+  const labelText = document.createElement("span");
+  labelText.textContent = "Lights";
+  label.appendChild(labelText);
+  const offTarget = document.createElement("span");
+  offTarget.className = "off-target";
+  label.appendChild(offTarget);
+  wrap.appendChild(label);
+
+  const list = document.createElement("ul");
+  list.className = "lights";
+  for (const l of lightsArr) {
+    const dev = deviceById[l.id];
+    const isMismatch = mismatch(l.level, dev);
+    if (isMismatch) mismatchCount++;
+
+    const li = document.createElement("li");
+    if (isMismatch) li.className = "mismatch";
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    const nm = document.createElement("span");
+    nm.className = "lname";
+    nm.textContent = lightName(l.id);
+    const desired = document.createElement("span");
+    desired.className = "ldesired";
+    desired.textContent = levelLabel(l.level);
+    const arrow = document.createElement("span");
+    arrow.className = "larrow";
+    arrow.textContent = "→";
+    const actual = document.createElement("span");
+    actual.className = "lactual";
+    actual.textContent = l.level === "leave" ? "" : actualLabel(dev);
+
+    li.appendChild(dot);
+    li.appendChild(nm);
+    li.appendChild(desired);
+    // A row that is on target reads as one value; "off → off" is noise. The
+    // arrow and actual appear only when the light disagrees with the zone.
+    if (l.level !== "leave" && (isMismatch || desired.textContent !== actual.textContent)) {
+      li.appendChild(arrow); li.appendChild(actual);
+    }
+    list.appendChild(li);
+  }
+  wrap.appendChild(list);
+
+  offTarget.textContent = mismatchCount > 0 ? `${mismatchCount} off target` : "";
+  return { el: wrap, mismatchCount };
+}
+
+function buildPresenceChips(s) {
+  let inputs;
+  try {
+    inputs = JSON.parse(s.presence_inputs);
+  } catch (_) {
+    inputs = [];
+  }
+  if (!Array.isArray(inputs) || !inputs.length) return null;
+
+  const wrap = document.createElement("div");
+  const label = document.createElement("div");
+  label.className = "section-label";
+  label.textContent = "Presence inputs";
+  wrap.appendChild(label);
+
+  const row = document.createElement("div");
+  row.className = "presence-row";
+  for (const entry of inputs) {
+    const chip = document.createElement("span");
+    const cls = entry.on === true ? "on" : entry.on === false ? "off" : "unknown";
+    chip.className = "pchip " + cls;
+    chip.textContent = presenceInputLabel(entry) + (entry.last ? " " : "");
+    if (entry.last) {
+      const last = document.createElement("span");
+      last.className = "last";
+      last.textContent = "▲ last";
+      chip.appendChild(last);
+    }
+    row.appendChild(chip);
+  }
+  wrap.appendChild(row);
+  return wrap;
+}
+
+function buildFooter(dev, s) {
   const foot = document.createElement("div");
   foot.className = "foot";
 
-  const { items: lightsArr, unparsedCount } = parseDesired(s.desired_summary);
   const disc = document.createElement("button");
   disc.className = "disclosure";
   disc.type = "button";
   const isOpen = openIds.has(String(dev.id));
   disc.setAttribute("aria-expanded", isOpen ? "true" : "false");
-  disc.innerHTML = '<span class="tri">▸</span><span class="dlabel"></span>';
-  disc.querySelector(".dlabel").textContent =
-    lightsArr.length + (lightsArr.length === 1 ? " light" : " lights") +
-    (unparsedCount > 0 ? " · " + unparsedCount + " unparsed" : "");
+  disc.innerHTML = '<span class="tri">▸</span><span class="dlabel">Engine reasoning</span>';
 
-  const list = document.createElement("ul");
-  list.className = "lights";
-  list.hidden = !isOpen;
-  for (const l of lightsArr) {
-    const li = document.createElement("li");
-    const nm = document.createElement("span");
-    nm.textContent = lightName(l.id);
-    const lv = document.createElement("span");
-    lv.className = "lvl";
-    lv.textContent = levelLabel(l.level);
-    li.appendChild(nm); li.appendChild(lv);
-    list.appendChild(li);
-  }
+  const explain = document.createElement("div");
+  explain.className = "explain";
+  explain.textContent = s.explain || "";
+  explain.hidden = !isOpen;
 
   disc.addEventListener("click", () => {
-    const nowOpen = list.hidden;
-    list.hidden = !nowOpen;
+    const nowOpen = explain.hidden;
+    explain.hidden = !nowOpen;
     disc.setAttribute("aria-expanded", nowOpen ? "true" : "false");
     const key = String(dev.id);
     if (nowOpen) openIds.add(key); else openIds.delete(key);
   });
-
-  foot.appendChild(disc);
-  foot.appendChild(list);
 
   const counters = document.createElement("div");
   counters.className = "counters";
@@ -511,10 +901,57 @@ function buildCard(dev) {
   const ev = s.evaluations_today != null ? s.evaluations_today : 0;
   const ov = s.overrides_today != null ? s.overrides_today : 0;
   counters.textContent = `${wr} writes · ${ev} evals · ${ov} override${ov === 1 ? "" : "s"}`;
-  foot.appendChild(counters);
 
-  card.appendChild(foot);
-  return card;
+  foot.appendChild(disc);
+  foot.appendChild(counters);
+  foot.appendChild(explain);
+  return foot;
+}
+
+// Returns { el, mismatchCount } — the caller sums mismatchCount across every
+// card for the header's "N lights off target".
+function buildCard(dev) {
+  const hasStates = !!(dev.states && Object.keys(dev.states).length);
+  const s = dev.states || {};
+  const offFlag = isOff(dev);
+  const card = document.createElement("div");
+  card.className = "card" + (offFlag ? " disabled" : "");
+  card.dataset.id = dev.id;
+
+  card.appendChild(buildTitleRow(dev, s, offFlag));
+
+  if (!hasStates) {
+    // A zone device that hasn't finished starting has no states at all yet --
+    // don't fabricate a period/lux/presence reading it never reported.
+    const notice = document.createElement("div");
+    notice.className = "verdict";
+    notice.textContent = "no state reported (device not started?)";
+    card.appendChild(notice);
+    return { el: card, mismatchCount: 0 };
+  }
+
+  const subline = buildOverrideSubline(s);
+  if (subline) card.appendChild(subline);
+
+  const verdict = document.createElement("div");
+  verdict.className = "verdict";
+  verdict.textContent = verdictFor(s, offFlag);
+  card.appendChild(verdict);
+
+  card.appendChild(buildFacts(s));
+
+  const strip = buildDayStrip(s);
+  if (strip) card.appendChild(strip);
+
+  const { el: lightsEl, mismatchCount } = buildLightsSection(s);
+  card.appendChild(lightsEl);
+
+  const presenceEl = buildPresenceChips(s);
+  if (presenceEl) card.appendChild(presenceEl);
+
+  card.appendChild(buildFooter(dev, s));
+
+  return { el: card, mismatchCount };
 }
 
 // Called on every successful poll (see `onPollOk`), payload and all. The
@@ -533,25 +970,40 @@ function render(all) {
   lastRenderedJson = json;
 
   deviceNames = {};
-  for (const d of all) deviceNames[String(d.id)] = d.name || ("#" + d.id);
+  deviceById = {};
+  for (const d of all) {
+    deviceNames[String(d.id)] = d.name || ("#" + d.id);
+    deviceById[String(d.id)] = d;
+  }
 
   const zones = all.filter(d => d.pluginId === PLUGIN_ID && d.deviceTypeId === ZONE_TYPE);
   const ctrl = all.find(d => d.pluginId === PLUGIN_ID && d.deviceTypeId === CTRL_TYPE) || null;
-
-  renderHeader(ctrl);
 
   const grid = $("grid");
   const empty = $("empty");
   if (!zones.length) {
     grid.textContent = "";
     empty.hidden = false;
+    renderHeader(ctrl, 0);
     return;
   }
   empty.hidden = true;
-  zones.sort((a, b) => zoneName(a).localeCompare(zoneName(b)));
+
+  // Attention order: overridden, occupied, vacant, off-duty, disabled; ties
+  // by name (sortRank is pure and table-driven-tested on its own).
+  zones.sort((a, b) => {
+    const rankDiff = sortRank(a.states, isOff(a)) - sortRank(b.states, isOff(b));
+    return rankDiff !== 0 ? rankDiff : zoneName(a).localeCompare(zoneName(b));
+  });
 
   grid.textContent = "";
-  for (const z of zones) grid.appendChild(buildCard(z));
+  let totalMismatches = 0;
+  for (const z of zones) {
+    const { el, mismatchCount } = buildCard(z);
+    totalMismatches += mismatchCount;
+    grid.appendChild(el);
+  }
+  renderHeader(ctrl, totalMismatches);
 }
 
 // Runs on every successful poll, changed or not, so the banner and the

@@ -45,6 +45,7 @@ sensor rather than the thing that actually caused the re-plan.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -160,6 +161,8 @@ class Zone:
         #: the wall clock behind a test's back. Carried across a config
         #: reload by :func:`persist.rebuild_zone`.
         self.clock = clock
+        #: (date, json) memo for _periods_today_json; None until first asked.
+        self._periods_today_cache = None
         self.logger = logger or logging.getLogger("Plugin")
 
         self.presence = Presence()
@@ -1005,6 +1008,93 @@ class Zone:
             "writes_today": self.writes_today,
             "overrides_today": self.overrides_today,
             "last_trigger": self.last_trigger,
+            "off_duty_cause": self.off_duty_cause or "",
+            "periods_today": self._periods_today_json(now),
+            "presence_inputs": self._presence_inputs_json(),
+        }
+
+    def _periods_today_json(self, now: dt.datetime) -> str:
+        """This zone's periods resolved to today's clock times, as JSON.
+
+        The status page's day strip (2026.4.0) needs sunset/sunrise-relative
+        periods at the time they actually land *today*, not the offset
+        expression a person would have to do the sun math on themselves --
+        the whole reason ``periods.period_window`` exists (section 5.5). A
+        period that crosses midnight is published as-is, ``to`` earlier than
+        ``from``: the page is the one that draws the wrap, not this method.
+
+        Never raises. A sun lookup that fails is a degradation the page has
+        to be told about rather than shown as "no periods configured", which
+        is what an empty ``[]`` would otherwise look exactly like (R15) --
+        so a failure here publishes the literal string ``"unavailable"``,
+        warned once, distinct from the real empty-periods answer.
+        """
+        key = ("periods-today", self.name)
+        today = now.date()
+        # Memoised per date: the answer only moves at midnight or on a config
+        # reload (which builds a fresh Zone), and snapshot() runs on every
+        # evaluation, so without this each publish would re-ask the server
+        # for the sun once per sun-relative boundary.
+        cached = self._periods_today_cache
+        if cached is not None and cached[0] == today:
+            return cached[1]
+        try:
+            entries = []
+            for period in self.config.periods:
+                start, end = periods_module.period_window(period, today, self.sun)
+                entry = {
+                    "name": period.name,
+                    "from": start.strftime("%H:%M"),
+                    "to": end.strftime("%H:%M"),
+                    "mode": period.mode,
+                }
+                if period.hold_seconds is not None:
+                    entry["hold_seconds"] = period.hold_seconds
+                if period.limit is not None:
+                    entry["limit"] = period.limit
+                entries.append(entry)
+        except Exception as exc:  # the sun call is the one thing here that can fail
+            compare.warn_once(
+                self.logger,
+                key,
+                f"{self.name}: could not resolve today's periods for the status "
+                f"page ({type(exc).__name__}: {exc}); publishing periods_today as "
+                "'unavailable' rather than an empty list, which would look like a "
+                "zone with no periods configured.",
+            )
+            return "unavailable"
+        compare.reset_warnings(key)
+        text = json.dumps(entries)
+        self._periods_today_cache = (today, text)
+        return text
+
+    def _presence_inputs_json(self) -> str:
+        """Every presence device and variable configured here, as JSON.
+
+        ``on`` is the last reading :meth:`ingest_presence` actually recorded
+        for that input (see ``Presence.last_value``), ``None`` if it has
+        never been ingested -- seeding only ingests an input reporting ON
+        (Engine._seed_zone), so a currently-off one can genuinely have
+        nothing recorded yet, and that is an honest answer rather than a
+        guess. ``last`` marks whichever input's edge most recently moved the
+        zone (``Presence.last_input_id``), so the status page can point at
+        "the one that mattered" without re-parsing ``last_trigger``'s prose.
+        """
+        entries = []
+        for dev_id in self.config.presence_devices:
+            entries.append(self._presence_input_entry(dev_id, "device"))
+        for var_id in self.config.presence_variables:
+            entry = self._presence_input_entry(var_id, "variable")
+            entry["name"] = _variable_label(var_id)
+            entries.append(entry)
+        return json.dumps(entries)
+
+    def _presence_input_entry(self, input_id, kind: str) -> dict:
+        return {
+            "id": input_id,
+            "kind": kind,
+            "on": self.presence.last_value.get(input_id),
+            "last": input_id == self.presence.last_input_id,
         }
 
 

@@ -784,6 +784,10 @@ def test_a_presence_device_reporting_off_at_seeding_changes_nothing():
     engine.seed_inputs(clock.now)
 
     assert zone.presence.last_seen is None
+    # ...but the reading is remembered for the status page's presence chips:
+    # "off" (False), not "never asked" (absent). Kills the mutation that
+    # skips off devices entirely and leaves every chip dashed after a restart.
+    assert zone.presence.last_value == {101: False}
 
 
 def test_a_lookup_that_failed_at_seeding_is_retried_and_decides_nothing_meanwhile(monkeypatch):

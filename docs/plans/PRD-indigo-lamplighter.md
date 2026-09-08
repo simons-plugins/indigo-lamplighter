@@ -486,7 +486,7 @@ handler follows the configured level from startup.
   `1949753199` *is* the control for the strips group. The plugin then mirrors
   press/dial itself (retiring the `indigo-scripts` wall_mirror triggers), and
   an override is known from the control, not inferred from the light.
-- **Read-only status page** through IWS — shipped in 2026.3.0 (see README "Status page"): zones, state, explain, period, lux, presence, override, desired levels, counters.
+- **Read-only status page** through IWS — shipped in 2026.3.0 (see README "Status page"): zones, state, explain, period, lux, presence, override, desired levels, counters. Redesigned in 2026.4.0: a plain-English verdict sentence, a desired-vs-actual lights list with mismatch markers, a 24-hour day strip of today's periods, and presence-input chips, all read directly from new zone states (`off_duty_cause`, `periods_today`, `presence_inputs`) rather than parsed out of `explain`'s prose.
 - **Adaptive hold**: learn `hold_seconds` per zone from presence gap
   statistics (the Dining study: 5 min bridges 69 % of gaps, 55 min needed).
 - **Scenes** as named level sets a period or an action can reference.

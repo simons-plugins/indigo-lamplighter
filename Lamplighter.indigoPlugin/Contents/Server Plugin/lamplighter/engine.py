@@ -497,9 +497,14 @@ class Engine:
                 # picked up here and holds the zone occupied, which a
                 # persisted timestamp on its own could not do.
                 zone.ingest_presence(device_id, True, now)
-            # Deliberately no `else: ingest(..., False, ...)`. An "off" now
-            # stamps last_seen, so seeding the off devices would push the hold
-            # forward on every seed and an empty room would never time out.
+            else:
+                # Deliberately NOT `ingest(..., False, ...)`. An "off" now
+                # stamps last_seen, so seeding the off devices would push the
+                # hold forward on every seed and an empty room would never
+                # time out. The reading itself is still worth remembering:
+                # the status page's presence chips read `last_value`, and
+                # "off" is the honest answer, "never asked" is not.
+                zone.presence.last_value[device_id] = False
 
         for var_id in zone.config.presence_variables:
             try:
@@ -518,6 +523,8 @@ class Engine:
                 # occupied, not "never seen" (the 2026-09-05 defect for a
                 # sensor, repeated here for a variable would be the same bug).
                 zone.ingest_presence(var_id, True, now)
+            else:
+                zone.presence.last_value[var_id] = False  # same as the device case above
 
         zone.read_lux(now)
 

@@ -195,6 +195,19 @@ def rebuild_zone(old_zone: Zone, new_config, now: dt.datetime) -> Zone:
     fresh.presence.on_devices = {
         dev_id for dev_id in old_zone.presence.on_devices if dev_id in new_config.presence_devices
     }
+    # last_value/last_input_id are status-page bookkeeping only (5.10), never
+    # persisted to disk -- but a reload never stopped the plugin, so carrying
+    # them across it is the same reasoning as on_devices above: a config edit
+    # to an unrelated zone must not blank a chip the person was just looking
+    # at. Filtered to inputs still configured, devices and variables alike.
+    still_configured = set(new_config.presence_devices) | set(new_config.presence_variables)
+    fresh.presence.last_value = {
+        input_id: value
+        for input_id, value in old_zone.presence.last_value.items()
+        if input_id in still_configured
+    }
+    if old_zone.presence.last_input_id in still_configured:
+        fresh.presence.last_input_id = old_zone.presence.last_input_id
     fresh.plugin_enabled = old_zone.plugin_enabled
     fresh.state = old_zone.state
     fresh.last_trigger = old_zone.last_trigger

@@ -100,17 +100,36 @@ class Presence:
     the half that is persisted across a restart (R13).
     """
 
-    def __init__(self, last_seen=None, on_devices=()):
+    def __init__(self, last_seen=None, on_devices=(), last_value=None, last_input_id=None):
         self.last_seen = last_seen
         self.on_devices = set(on_devices)
+        #: The last reading ingested for each input, device or variable id ->
+        #: bool. Not the same question as ``on_devices``: a device that
+        #: reported off is *removed* from ``on_devices`` (it must not linger
+        #: there as a stale "on"), but this dict still has to say "off" for
+        #: it rather than "never asked" -- which is what the status page's
+        #: per-input chips need (PRD section 5.10, "presence_inputs"). Never
+        #: persisted: it is rebuilt across a restart the same way
+        #: ``on_devices`` is (seeded from the devices), and carried across a
+        #: config reload by ``persist.rebuild_zone``.
+        self.last_value = dict(last_value or {})
+        #: The input id the most recent edge (ACTIVATED or CLEARED) belonged
+        #: to, so the status page can point at "the one that last mattered"
+        #: without parsing the ``last_trigger`` cause string back into an id.
+        self.last_input_id = last_input_id
 
     def update(self, device_id, is_on: bool, now: dt.datetime) -> Edge:
         """Feed one presence reading in; say what kind of edge it was."""
+        self.last_value[device_id] = bool(is_on)
+
         if is_on:
             was_quiet = not self.on_devices
             self.on_devices.add(device_id)
             self.last_seen = now
-            return Edge.ACTIVATED if was_quiet else Edge.REFRESHED
+            edge = Edge.ACTIVATED if was_quiet else Edge.REFRESHED
+            if edge is Edge.ACTIVATED:
+                self.last_input_id = device_id
+            return edge
 
         if device_id not in self.on_devices:
             # Nothing to clear. Not an edge, and it must not stamp
@@ -124,6 +143,7 @@ class Presence:
         # sensor is still on the value is not read (see `active`), and when
         # this was the last one it is the instant the hold begins.
         self.last_seen = now
+        self.last_input_id = device_id
         return Edge.CLEARED
 
     def active(self, now: dt.datetime, hold_seconds: int) -> bool:

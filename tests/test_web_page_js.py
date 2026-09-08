@@ -136,3 +136,206 @@ def test_parsedesired_and_levellabel_behave_as_documented(tmp_path):
     assert output["itemCount"] == 3
     assert output["unparsedCount"] == 1
     assert output["leaveLabel"] == "left alone"
+
+
+_DOCUMENT_STUB = textwrap.dedent(
+    """
+    const document = {
+        getElementById: () => ({ textContent: "", classList: { toggle: () => {} } }),
+    };
+    """
+)
+
+
+def _run_page_logic(tmp_path, driver, name="driver.js"):
+    """Evaluate the real page-logic block under node, plus `driver`, and
+    return the JSON object its last `console.log` line printed.
+
+    Same shape as `test_parsedesired_and_levellabel_behave_as_documented`
+    above: `IndigoAPI` is left undefined so `init()`'s own guard bails
+    through `showErr()` rather than reaching for a real connection.
+    """
+    blocks = _extract_script_blocks()
+    page_logic = blocks[1]
+    script_path = tmp_path / name
+    script_path.write_text(_DOCUMENT_STUB + page_logic + driver, encoding="utf-8")
+
+    result = subprocess.run(
+        ["node", str(script_path)], capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"node failed evaluating {name}:\n{result.stderr}"
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+# --------------------------------------------------- verdictFor (table-driven)
+
+_VERDICT_CASES = [
+    (
+        "occupied_with_a_level_to_switch",
+        {"state": "occupied", "period": "Evening", "desired_summary": "1=60"},
+        False,
+        "Someone is here — lights at Evening levels.",
+    ),
+    (
+        "occupied_nothing_to_switch",
+        {"state": "occupied", "period": "Evening", "desired_summary": "1=leave"},
+        False,
+        "Someone is here — nothing to switch in Evening.",
+    ),
+    (
+        # No presence_last_seen -> no "since HH:MM" clause. The clause is
+        # covered separately below, without pinning node's locale-dependent
+        # time formatting into this table.
+        "vacant_lights_off",
+        {"state": "vacant", "desired_summary": "1=off"},
+        False,
+        "Empty — lights off.",
+    ),
+    (
+        "vacant_dimmed_to_vacant_levels",
+        {"state": "vacant", "desired_summary": "1=25"},
+        False,
+        "Empty — lights dimmed to vacant levels.",
+    ),
+    (
+        # No override_expires -> the "it expires" fallback, same reason.
+        "overridden_names_the_expiry",
+        {"state": "overridden"},
+        False,
+        "Changed by hand — holding whatever the lights are now until it expires.",
+    ),
+    (
+        "off_duty_bright_names_the_lux",
+        {"state": "off_duty", "off_duty_cause": "bright", "lux": "291"},
+        False,
+        "Bright enough (291 lx) — lights left off.",
+    ),
+    (
+        "off_duty_no_period",
+        {"state": "off_duty", "off_duty_cause": "no_period"},
+        False,
+        "No period covers now — lights left alone.",
+    ),
+    (
+        "off_duty_disabled_cause",
+        {"state": "off_duty", "off_duty_cause": "disabled"},
+        False,
+        "Zone disabled — lights left alone.",
+    ),
+    (
+        "the_device_itself_is_off",
+        {"state": "occupied", "desired_summary": "1=60"},
+        True,
+        "Zone switched off in Indigo.",
+    ),
+]
+
+
+@pytest.mark.parametrize("name,states,off_flag,expected", _VERDICT_CASES, ids=[c[0] for c in _VERDICT_CASES])
+def test_verdictfor_table(tmp_path, name, states, off_flag, expected):
+    driver = f"""
+        console.log(JSON.stringify({{
+            verdict: verdictFor({json.dumps(states)}, {json.dumps(off_flag)}),
+        }}));
+    """
+    output = _run_page_logic(tmp_path, driver, name=f"verdict_{name}.js")
+    assert output["verdict"] == expected
+
+
+def test_verdictfor_names_the_since_and_until_clock_times(tmp_path):
+    """The "since"/"until" clauses use fmtTime, whose format is node's local
+    default -- so the expected value is computed the same way, inside node,
+    rather than a hardcoded string that would pin a locale."""
+    driver = """
+        const seen = "2026-09-04T20:00:00";
+        const expires = "2026-09-04T21:00:00";
+        console.log(JSON.stringify({
+            vacant: verdictFor({ state: "vacant", presence_last_seen: seen, desired_summary: "1=off" }, false),
+            overridden: verdictFor({ state: "overridden", override_expires: expires }, false),
+            expectedSince: fmtTime(seen),
+            expectedUntil: fmtTime(expires),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="verdict_clock_times.js")
+    assert output["vacant"] == f"Empty since {output['expectedSince']} — lights off."
+    assert output["overridden"] == (
+        f"Changed by hand — holding whatever the lights are now until {output['expectedUntil']}."
+    )
+
+
+# ------------------------------------------------------- mismatch (table-driven)
+
+_MISMATCH_CASES = [
+    ("leave_never_mismatches", "leave", {"onState": True, "brightness": 80}, False),
+    ("desired_off_actual_on_relay", "off", {"onState": True}, True),
+    ("desired_off_actual_off_relay", "off", {"onState": False}, False),
+    ("desired_on_actual_off_relay", "on", {"onState": False}, True),
+    ("desired_on_actual_on_relay", "on", {"onState": True}, False),
+    ("numeric_within_band_matches", "50", {"onState": True, "brightness": 52}, False),
+    ("numeric_outside_band_mismatches", "50", {"onState": True, "brightness": 60}, True),
+    ("numeric_dimmer_off_mismatches", "50", {"onState": False, "brightness": 0}, True),
+    ("numeric_on_a_relay_uses_onish", "50", {"onState": True}, False),
+    ("numeric_zero_on_a_relay_that_is_on_mismatches", "0", {"onState": True}, True),
+    ("unresolved_device_never_mismatches", "50", None, False),
+]
+
+
+@pytest.mark.parametrize("name,level,dev,expected", _MISMATCH_CASES, ids=[c[0] for c in _MISMATCH_CASES])
+def test_mismatch_table(tmp_path, name, level, dev, expected):
+    driver = f"""
+        console.log(JSON.stringify({{
+            mismatch: mismatch({json.dumps(level)}, {json.dumps(dev)}),
+        }}));
+    """
+    output = _run_page_logic(tmp_path, driver, name=f"mismatch_{name}.js")
+    assert output["mismatch"] is expected
+
+
+# ---------------------------------------------------- bandSegments (table-driven)
+
+def test_bandsegments_a_same_day_period_is_one_segment(tmp_path):
+    driver = """
+        console.log(JSON.stringify({
+            segments: bandSegments({ from: "18:00", to: "23:00" }),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="band_same_day.js")
+    assert output["segments"] == [{"startPct": 75, "widthPct": pytest.approx(20.833333, rel=1e-4)}]
+
+
+def test_bandsegments_a_midnight_crossing_period_is_two_segments(tmp_path):
+    driver = """
+        console.log(JSON.stringify({
+            segments: bandSegments({ from: "22:00", to: "06:00" }),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="band_wrap.js")
+    segments = output["segments"]
+    assert len(segments) == 2
+    # 22:00 -> 24:00 (2h = 8.333%), then 00:00 -> 06:00 (6h = 25%)
+    assert segments[0]["startPct"] == pytest.approx(91.6667, rel=1e-3)
+    assert segments[0]["widthPct"] == pytest.approx(8.3333, rel=1e-3)
+    assert segments[1] == {"startPct": 0, "widthPct": 25}
+
+
+# -------------------------------------------------------- sortRank (table-driven)
+
+_SORTRANK_CASES = [
+    ("overridden_first", {"state": "overridden"}, False, 0),
+    ("occupied_second", {"state": "occupied"}, False, 1),
+    ("vacant_third", {"state": "vacant"}, False, 2),
+    ("off_duty_fourth", {"state": "off_duty"}, False, 3),
+    ("disabled_device_is_last_of_the_named_states", {"state": "occupied"}, True, 4),
+    ("no_states_yet_sorts_after_disabled", {}, False, 5),
+]
+
+
+@pytest.mark.parametrize("name,states,off_flag,expected", _SORTRANK_CASES, ids=[c[0] for c in _SORTRANK_CASES])
+def test_sortrank_table(tmp_path, name, states, off_flag, expected):
+    driver = f"""
+        console.log(JSON.stringify({{
+            rank: sortRank({json.dumps(states)}, {json.dumps(off_flag)}),
+        }}));
+    """
+    output = _run_page_logic(tmp_path, driver, name=f"sortrank_{name}.js")
+    assert output["rank"] == expected
