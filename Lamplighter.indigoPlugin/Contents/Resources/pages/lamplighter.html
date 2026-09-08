@@ -68,7 +68,7 @@ color:var(--text-secondary);margin-bottom:2px}
 .timeline-wrap{margin-bottom:12px}
 .tl-frame{position:relative}
 .tl-lane-row{display:flex;align-items:stretch;gap:6px;margin-bottom:2px}
-.tl-label{flex:0 0 88px;font-size:10px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;
+.tl-label{flex:0 0 100px;font-size:10px;font-weight:600;letter-spacing:0;text-transform:none;
 color:var(--text-secondary);display:flex;align-items:center;white-space:nowrap;overflow:hidden;
 text-overflow:ellipsis}
 .tl-track{position:relative;flex:1 1 auto;background:var(--chip-bg);border-radius:4px;overflow:hidden}
@@ -104,7 +104,7 @@ box-shadow:0 0 0 2px var(--card-bg)}
 transform:translateX(-50%);white-space:nowrap}
 .tl-future{position:absolute;top:0;bottom:0;right:0;background:var(--bg);opacity:.35;z-index:1}
 
-.tl-ticks{display:flex;margin-left:94px;font-size:10px;color:var(--text-secondary);
+.tl-ticks{display:flex;margin-left:106px;font-size:10px;color:var(--text-secondary);
 margin-top:3px;font-variant-numeric:tabular-nums;position:relative;height:12px}
 .tl-ticks span{position:absolute;transform:translateX(-50%)}
 
@@ -1412,9 +1412,10 @@ function buildLightsSection(s) {
     li.appendChild(dot);
     li.appendChild(nm);
     li.appendChild(desired);
-    // A row that is on target reads as one value; "off → off" is noise. The
-    // arrow and actual appear only when the light disagrees with the zone.
-    if (l.level !== "leave" && (isMismatch || desired.textContent !== actual.textContent)) {
+    // A row that is on target reads as one value: "off → off" is noise, and
+    // so is "100 % → on" for a relay that is exactly where it was asked to
+    // be. The arrow and actual appear only when the light disagrees.
+    if (l.level !== "leave" && isMismatch) {
       li.appendChild(arrow); li.appendChild(actual);
     }
     list.appendChild(li);
