@@ -247,7 +247,13 @@ class IndigoAPI {
     // `tolerantJson`: Indigo may serve this .json file with a text/plain
     // Content-Type, and this endpoint must still read it as JSON when it does.
     async getHistory() {
-        return this._fetch("/static/pages/lamplighter-history.json", { method: "GET", tolerantJson: true });
+        // IWS (and the Reflector in front of it) serve static files with
+        // `cache-control: public, max-age=86400`, so without a cache-buster
+        // the browser would happily show yesterday's history for a day. The
+        // query string defeats the URL cache; `no-store` tells the browser
+        // not to keep this response either.
+        return this._fetch(`/static/pages/lamplighter-history.json?t=${Date.now()}`,
+            { method: "GET", tolerantJson: true, cache: "no-store" });
     }
 
     // Read-only page: this class keeps the shared IndigoAPI shape from the
@@ -1278,7 +1284,10 @@ function buildTimeline(s, historyEvents, historyErrorMsg, lightsArr, zone, histo
   for (const e of historyEvents) {
     if (!e || typeof e.t !== "string" || isNaN(new Date(e.t).getTime())) { unusableCount++; continue; }
     if (!KNOWN_EVENT_KINDS.has(e.k)) { unusableCount++; continue; }
-    if ((e.k === "light" || e.k === "write") && typeof e.level !== "number") { unusableCount++; continue; }
+    // A light REPORT is always numeric; a WRITE carries what the zone asked
+    // for, which the reconciler sends as a number or as "on"/"off".
+    if (e.k === "light" && typeof e.level !== "number") { unusableCount++; continue; }
+    if (e.k === "write" && typeof e.level !== "number" && e.level !== "on" && e.level !== "off") { unusableCount++; continue; }
     usableEvents.push(e);
   }
 

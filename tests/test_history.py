@@ -17,6 +17,7 @@ from lamplighter import history as history_module
 from lamplighter.history import MAX_EVENTS, RETENTION_HOURS, VERSION, History, ZoneHistory
 
 NOW = dt.datetime(2026, 9, 8, 20, 0, 0)
+ISO = "%Y-%m-%dT%H:%M:%S"
 LOG = logging.getLogger("test.history")
 
 
@@ -438,3 +439,36 @@ def test_the_cap_and_a_subsequent_age_trim_both_still_work_on_increasing_timesta
     assert len(zh.events) == 1
     assert zh.events[0]["k"] == "write"
     assert zh.events[0]["level"] == 2
+
+
+def test_stale_events_age_out_before_the_cap_is_judged_so_no_gap_is_marked():
+    """Kills: judging the count-based cap before the age trim (or on the
+    original event count instead of what survives age-trimming) -- age must
+    run first, so a burst of MAX_EVENTS events that are ALL already stale is
+    dropped by age alone and never reaches the cap at all. If the cap were
+    judged first here, this exact scenario would (wrongly) insert a `gap`
+    marker for what is actually just Tuesday aging out."""
+    zh = ZoneHistory()
+    old = NOW - dt.timedelta(hours=RETENTION_HOURS + 1)
+    zh.events = [{"t": old.strftime(ISO), "k": "write", "id": 1, "level": 1} for _ in range(MAX_EVENTS)]
+    zh.append(NOW, "write", id=1, level=2)
+    assert [e["k"] for e in zh.events] == ["write"]
+    assert zh.events[0]["level"] == 2
+
+
+def test_history_load_calls_rebuild_last_levels_so_the_light_dedupe_table_survives_a_round_trip():
+    """Kills: `History.load` skipping `rebuild_last_levels` -- a restart
+    would then forget every light's last recorded level, and the very first
+    report after every restart would be written again even when it repeats
+    exactly what was already on disk."""
+    history = History(logger=LOG)
+    history.record_light("Kitchen", NOW, 201, 60)
+    text = history.to_json(NOW)
+
+    restored = History(logger=LOG)
+    restored.load(text, now=NOW)
+    restored.dirty = False
+    restored.record_light("Kitchen", NOW, 201, 60)
+
+    assert restored.dirty is False
+    assert len(restored.zones["Kitchen"].events) == 1

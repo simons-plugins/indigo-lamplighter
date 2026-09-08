@@ -504,6 +504,20 @@ def test_periodsfortimeline_notes_malformed_period_data(tmp_path):
     assert output["note"] == "period data unreadable"
 
 
+def test_periodsfortimeline_notes_unavailable_period_times(tmp_path):
+    """Kills: the `unavailable` branch dropped from `periodsForTimeline`
+    (falling through to the `malformed`/generic path instead) -- the literal
+    "unavailable" sentinel from `periods_today` needs its OWN note, distinct
+    from "period data unreadable" (malformed) and from the separate "sun
+    times unavailable" note `stripNoteFor` adds for approximate bands."""
+    driver = """
+        const r = periodsForTimeline({ period: "Evening", periods_today: "unavailable" });
+        console.log(JSON.stringify({ periods: r.periods, note: r.note }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="periodsfortimeline_unavailable_note.js")
+    assert output == {"periods": [], "note": "period times unavailable"}
+
+
 # --------------------------------------------- validPeriodEntry / splitValidPeriods
 
 _VALID_PERIOD_ENTRY_CASES = [
@@ -853,14 +867,96 @@ def test_levelintervals_carries_in_a_level_from_before_midnight(tmp_path):
     assert output["intervals"] == [[dt_ms("2026-09-08T00:00:00"), dt_ms("2026-09-08T01:00:00"), 40]]
 
 
-def test_unionintervals_merges_overlapping_and_adjacent(tmp_path):
+def test_levelintervals_a_level_0_report_ends_the_interval_and_draws_nothing(tmp_path):
+    """Kills: `typeof level === "number" && level > 0` weakened to just
+    `level` (0 is falsy but still `typeof === "number"`, so a naive
+    `!!level` check happens to work here too -- this pins the actual `> 0`
+    comparison) -- a light reporting 0 must close its lit interval rather
+    than draw a zero-height (or worse, on-looking) segment."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 3, 0, 0);
+        const events = [
+          { t: "2026-09-08T01:00:00", k: "light", id: 201, level: 60 },
+          { t: "2026-09-08T02:00:00", k: "light", id: 201, level: 0 },
+        ];
+        const lit = levelIntervals(events, 201, dayStart, now);
+        console.log(JSON.stringify({ n: lit.length, level: lit[0][2], mins: minutesOf(lit) }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="levelintervals_zero.js")
+    assert output == {"n": 1, "level": 60, "mins": 60}
+
+
+def test_levelintervals_ignores_another_devices_events(tmp_path):
+    """Kills: the `e.id === deviceId` filter dropped or loosened -- a light
+    lane would otherwise draw a neighbour's report as if it were its own."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 3, 0, 0);
+        const events = [
+          { t: "2026-09-08T00:30:00", k: "light", id: 202, level: 100 },
+        ];
+        const lit = levelIntervals(events, 201, dayStart, now);
+        console.log(JSON.stringify({ lit }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="levelintervals_other_device.js")
+    assert output["lit"] == []
+
+
+def test_intervalsfromstates_and_levelintervals_ignore_events_after_now(tmp_path):
+    """Kills: the `ev.t > nowMs` break dropped from either function's scan --
+    an event that has not happened yet (a clock skew, or simply data past
+    the moment the page asked for) must not be drawn as if it already had."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 3, 0, 0);
+        const events = [
+          { t: "2026-09-08T01:00:00", k: "state", to: "occupied", from: "vacant" },
+          { t: "2026-09-08T04:00:00", k: "state", to: "vacant", from: "occupied" },
+          { t: "2026-09-08T01:00:00", k: "light", id: 201, level: 60 },
+          { t: "2026-09-08T04:00:00", k: "light", id: 201, level: 0 },
+        ];
+        const { occupied } = intervalsFromStates(events, dayStart, now);
+        const lit = levelIntervals(events, 201, dayStart, now);
+        console.log(JSON.stringify({
+          occEnd: occupied[0][1] === now.getTime(),
+          litEnd: lit[0][1] === now.getTime(),
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="ignore_events_after_now.js")
+    assert output == {"occEnd": True, "litEnd": True}
+
+
+def test_intervalsfromstates_an_overridden_state_lands_in_the_overridden_list(tmp_path):
+    """Kills: `else if (state === "overridden")` dropped or merged into the
+    `occupied` branch -- an overridden period must be drawn on its own
+    lane, not counted (or silently discarded) as ordinary occupied time."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 3, 0, 0);
+        const events = [
+          { t: "2026-09-08T01:00:00", k: "state", to: "overridden", from: "occupied" },
+        ];
+        const r = intervalsFromStates(events, dayStart, now);
+        console.log(JSON.stringify({ n: r.overridden.length, occ: r.occupied.length }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="intervalsfromstates_overridden.js")
+    assert output == {"n": 1, "occ": 0}
+
+
+def test_unionintervals_merges_overlapping_and_closes_adjacent_gaps(tmp_path):
+    """Kills: a `<` where the adjacency check needs `<=` (`iv[0] <= last[1]`)
+    -- two intervals that exactly touch ([0,10] and [10,20]) must merge into
+    one, not sit side by side as if there were a gap between them."""
     driver = """
         console.log(JSON.stringify({
-            u: unionIntervals([[0, 10], [5, 15], [20, 30]]),
+            overlapping: unionIntervals([[0, 10], [5, 15], [20, 30]]),
+            adjacent: unionIntervals([[0, 10], [10, 20]]),
         }));
     """
     output = _run_page_logic(tmp_path, driver, name="unionintervals.js")
-    assert output["u"] == [[0, 15], [20, 30]]
+    assert output["overlapping"] == [[0, 15], [20, 30]]
+    assert output["adjacent"] == [[0, 20]]
 
 
 def test_intersectintervals_returns_only_the_overlap(tmp_path):
@@ -999,6 +1095,90 @@ def test_statsfor_a_gap_marker_event_does_not_break_the_computation(tmp_path):
     assert output["cycles"] == 0
 
 
+def test_statsfor_cycles_counts_one_dimmed_light_and_two_overlapping_lights_as_one_cycle_each(tmp_path):
+    """`cycles` is `unionIntervals(...).length` across every configured
+    light -- kills counting per-light intervals instead of the union, which
+    would double-count a light that only dimmed (never truly off) and a
+    second light overlapping the first."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 3, 0, 0);
+        const dim = [
+          { t: "2026-09-08T01:00:00", k: "light", id: 201, level: 60 },
+          { t: "2026-09-08T02:00:00", k: "light", id: 201, level: 30 },
+        ];
+        const two = [
+          { t: "2026-09-08T01:00:00", k: "light", id: 201, level: 60 },
+          { t: "2026-09-08T01:30:00", k: "light", id: 202, level: 60 },
+        ];
+        console.log(JSON.stringify({
+          dim: statsFor(dim, [201], dayStart, now).cycles,
+          two: statsFor(two, [201, 202], dayStart, now).cycles,
+        }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="statsfor_cycles.js")
+    assert output == {"dim": 1, "two": 1}
+
+
+def test_statsfor_subtracts_overridden_time_from_on_while_empty(tmp_path):
+    """Kills: `onWhileEmpty` computed as only `anyLight` minus `occUnion`
+    (dropping the second `subtractIntervals(..., overUnion)`) -- a light on
+    while a person has overridden it by hand must not be counted as
+    wasted/on-while-nobody's-there."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 3, 0, 0);
+        const events = [
+          { t: "2026-09-08T00:30:00", k: "state", to: "overridden", from: "vacant" },
+          { t: "2026-09-08T01:00:00", k: "light", id: 201, level: 60 },
+        ];
+        console.log(JSON.stringify(statsFor(events, [201], dayStart, now)));
+    """
+    output = _run_page_logic(tmp_path, driver, name="statsfor_override_subtraction.js")
+    assert output["lightsOnMinutes"] == 120
+    assert output["onWhileEmptyMinutes"] == 0
+
+
+def test_statsfor_here_with_lights_off_is_occupied_minus_any_light(tmp_path):
+    """Kills: `hereLightsOff` computed from `anyLight` instead of
+    `subtractIntervals(occUnion, anyLight)` (or the arguments swapped) --
+    the figure is specifically "occupied AND no light on", not "not
+    occupied"."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 3, 0, 0);
+        const events = [
+          { t: "2026-09-08T01:00:00", k: "state", to: "occupied", from: "vacant" },
+          { t: "2026-09-08T02:00:00", k: "light", id: 201, level: 60 },
+        ];
+        console.log(JSON.stringify(statsFor(events, [201], dayStart, now)));
+    """
+    output = _run_page_logic(tmp_path, driver, name="statsfor_here_lights_off.js")
+    assert output["occupiedMinutes"] == 120
+    assert output["hereLightsOffMinutes"] == 60
+
+
+def test_statsfor_overridecount_ignores_yesterdays_start_and_a_later_end(tmp_path):
+    """Kills: the override-start filter's `t >= dayStartMs` (or the paired
+    `t <= nowMs`) dropped -- an override taken yesterday, ended and
+    restarted today must count exactly the one start that actually falls
+    inside today's window, and an `end` event must never be mistaken for a
+    `start` and counted at all."""
+    driver = """
+        const dayStart = new Date(2026, 8, 8, 0, 0, 0);
+        const now = new Date(2026, 8, 8, 3, 0, 0);
+        const events = [
+          { t: "2026-09-07T22:00:00", k: "override", phase: "start", device: 201 },
+          { t: "2026-09-07T23:00:00", k: "override", phase: "end", device: 201 },
+          { t: "2026-09-08T01:00:00", k: "override", phase: "start", device: 201 },
+          { t: "2026-09-08T02:00:00", k: "override", phase: "end", device: 201 },
+        ];
+        console.log(JSON.stringify({ n: statsFor(events, [201], dayStart, now).overrideCount }));
+    """
+    output = _run_page_logic(tmp_path, driver, name="statsfor_overridecount.js")
+    assert output["n"] == 1
+
+
 @pytest.mark.parametrize("name,zone,expected", [
     ("Kitchen Pendants", "Kitchen", "Pendants"),
     ("Kitchen - LED Strip", "Kitchen", "LED Strip"),
@@ -1131,6 +1311,12 @@ def test_buildtimeline_counts_events_it_could_not_use(tmp_path):
             {{ t: "2026-09-08T01:00:00", k: "made-up-kind" }},
             {{ t: "2026-09-08T01:00:00", k: "light", id: 201, level: "sixty" }},
             {{ t: "2026-09-08T01:00:00", k: "light", id: 201, level: 60 }},
+            // Writes legitimately carry "on"/"off" (the reconciler's own
+            // levels) and must NOT be counted -- the seed from a real day had
+            // every one of these flagged before this row existed.
+            {{ t: "2026-09-08T01:00:00", k: "write", id: 201, level: "off" }},
+            {{ t: "2026-09-08T01:00:00", k: "write", id: 201, level: "on" }},
+            {{ t: "2026-09-08T01:00:00", k: "write", id: 201, level: "dim-ish" }},
         ];
         const wrap = buildTimeline({_ZONE_STATES}, events, null, [], "Kitchen", "ok", null, false);
         const notes = findByClass(wrap, "tl-note").map(e => e.textContent);
@@ -1138,7 +1324,7 @@ def test_buildtimeline_counts_events_it_could_not_use(tmp_path):
     """
     )
     output = _run_page_logic(tmp_path, driver, name="timeline_unusable.js")
-    assert any("3 history events could not be read" in n for n in output["notes"])
+    assert any("4 history events could not be read" in n for n in output["notes"])
 
 
 def test_buildtimeline_counts_an_override_end_with_no_matching_start(tmp_path):

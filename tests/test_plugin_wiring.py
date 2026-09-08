@@ -1649,6 +1649,32 @@ def test_startup_loads_an_existing_history_file(install):
     assert the_plugin.history.zones["Hallway"].events[0]["to"] == "occupied"
 
 
+def test_startup_force_writes_a_version_1_history_file(install):
+    """Kills: skipping the startup `_write_history(force=True)` call, or
+    writing an envelope whose `version` does not match what `History`
+    itself claims to write -- the status page's poll must never 404 or
+    choke on a version mismatch on a fresh install that has recorded
+    nothing yet."""
+    started(a_document())
+
+    payload = json.loads(_history_text(install, plugin_module))
+    assert payload["version"] == 1
+    assert "zones" in payload
+
+
+def test_a_successful_write_clears_dirty_so_the_next_interval_writes_nothing(install):
+    """Kills: `_write_history` never clearing `history.dirty` on a
+    successful write (or clearing it and then putting it back
+    unconditionally) -- a quiet house would then get a filesystem write on
+    every single periodic pass forever, not just after something changed."""
+    the_plugin = started(a_document())
+    the_plugin.history.record_write("Hallway", dt.datetime.now(), 201, "on")
+
+    the_plugin._write_history(dt.datetime.now(), force=True)
+
+    assert the_plugin.history.dirty is False
+
+
 def test_a_worker_pass_writes_history_no_more_often_than_the_interval(install):
     """Kills: writing on every worker pass regardless of the interval, which
     would put a filesystem write on the hot path of every single tick in a
@@ -1823,6 +1849,22 @@ def test_a_worker_pass_survives_write_history_raising(install, monkeypatch):
     the_plugin.runConcurrentThread()  # must not raise
 
     assert len(the_plugin.slept) == 2, "the loop survived the raise and slept again"
+
+
+def test_an_unreadable_history_file_is_warned_about_not_silently_ignored(install, caplog):
+    """Kills: narrowing `_load_history`'s except clause to `ValueError`
+    only (or dropping it entirely) -- a directory sitting where the file
+    should be raises a plain `OSError` (`IsADirectoryError`), the opposite
+    branch from the UnicodeDecodeError/ValueError case pinned right below,
+    and startup must degrade to an empty history rather than crash (R15)."""
+    path = plugin_module.Plugin._history_path(str(install))
+    os.makedirs(path, exist_ok=True)  # a directory where the file should be -> OSError
+
+    with caplog.at_level("WARNING"):
+        the_plugin = started(a_document())  # must not raise
+
+    assert the_plugin.engine is not None, "startup completed rather than aborting"
+    assert any("could not read the history file" in r.getMessage() for r in caplog.records)
 
 
 def test_load_history_survives_a_file_that_is_not_valid_utf8(install, caplog):
