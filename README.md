@@ -12,12 +12,13 @@ late or a group that reads back a few points low cannot make it change its
 mind.
 
 **Lamplighter is built to be set up and run through an AI assistant.** There
-is no configuration window. Zones live in one JSON file that the plugin
-validates and hot-reloads, and a matching set of MCP tools lets an assistant
-read, explain and edit that file for you. In practice that means you set the
-whole thing up from your phone, by voice, without sitting at the Mac: "add a
-zone called Kitchen with these four lights and the PIR, on at dusk, off after
-five minutes empty", then "why did the kitchen lights go off?" See
+is no zone editor. Zones live in one JSON file that the plugin validates and
+hot-reloads, and a matching set of MCP tools lets an assistant read, explain
+and edit that file for you. Once the two plugins are installed (two
+double-clicks on the Indigo Mac, once), everything else happens from
+wherever you are, by voice if you like: "add a zone called Kitchen with these
+four lights and the PIR, on at dusk, off after five minutes empty", then
+"why are the kitchen lights off?" See
 [Set it up by talking to it](#set-it-up-by-talking-to-it).
 
 ![Lamplighter status page](docs/images/lamplighter-status-page.png)
@@ -41,11 +42,12 @@ Reflector, and it ships a `lamplighter_*` tool set written for this plugin:
 | `lamplighter_update_zone` | change a zone: a JSON-merge patch, checked by Lamplighter's own validator before it is written, then hot-reloaded |
 | `lamplighter_explain` | ask why a zone is doing what it is doing, or dry-run it at a chosen time |
 | `lamplighter_reset_override`, `lamplighter_lock_zone` | release or take a manual lock |
-| `lamplighter_set_enabled`, `lamplighter_reconcile_now` | switch a zone or the whole plugin on and off, force a pass |
+| `lamplighter_set_enabled`, `lamplighter_reconcile_now` | switch a zone or the whole plugin on and off, re-plan every zone on the next pass |
 
-Point any MCP-capable assistant at lite (the Claude apps on iPhone, iPad and
-desktop take a remote MCP connector; lite's README has the URL and token
-setup) and talk to it:
+Point any MCP client that can reach lite's endpoint with its bearer token
+at it (lite's README walks through Claude Code and Claude Desktop; the same
+Reflector URL is what a phone assistant's remote connector needs) and talk
+to it:
 
 - "Make a zone for the study: lights are the desk lamp and the bookcase
   strip, presence is the study radar, hold ten minutes, no daylight sensor.
@@ -56,10 +58,10 @@ setup) and talk to it:
 - "Dim the kitchen to thirty after ten at night."
 
 The assistant finds the device ids, writes the patch, and the plugin either
-accepts it and reloads within a second or refuses it with the exact path that
-is wrong, which the assistant reads back and fixes. Nothing here needs a
-terminal, and the zone device, the status page and the event log all show the
-result immediately.
+accepts it and reloads within about five seconds or refuses it with the path
+that is wrong, which the assistant reads back and fixes. Nothing after the
+install needs a terminal or a Mac, and the zone device, the status page and
+the event log all show the result straight away.
 
 You can still edit the file by hand, and the schema below is the contract
 either way. The rest of this README explains what the assistant is
@@ -153,7 +155,7 @@ which on a stock 2025.2 server is
 ```
 
 The plugin writes `{"version": 1, "zones": []}` there if the file is missing,
-watches its modification time, and reloads within a couple of seconds of a
+watches its modification time, and reloads within about five seconds of a
 save.
 Overrides, presence and the dark verdict survive a reload. **A file that does
 not validate is refused whole**: the error names the failing path, is logged
