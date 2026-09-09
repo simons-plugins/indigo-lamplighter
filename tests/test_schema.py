@@ -137,6 +137,32 @@ def test_presence_variables_rejects_a_non_integer():
     assert errors, "a variable NAME is not a variable id"
 
 
+def test_a_presence_device_may_declare_the_state_to_read():
+    """A presence entry may be an object naming the state, so an alarm zone
+    can be read directly instead of through a masquerade device (issue #11).
+
+    Kills: a `presence_devices` schema still pinned to `device_id` items,
+    which would reject the object form the loader accepts.
+    """
+    doc = copy.deepcopy(EXAMPLE)
+    doc["zones"][0]["presence_devices"] = [
+        1544029753,
+        {"id": 1408042345, "state": "status", "on_when": True},
+    ]
+    assert _errors(doc) == []
+
+
+def test_a_declared_presence_entry_needs_its_state():
+    """`{"id": ...}` alone is not a declaration: without `state` there is
+    nothing to read, and the entry would silently mean something else.
+
+    Kills: a `presence_input` object schema with no `required`.
+    """
+    doc = copy.deepcopy(EXAMPLE)
+    doc["zones"][0]["presence_devices"] = [{"id": 1408042345}]
+    assert _errors(doc), "an entry with no state is not a presence input"
+
+
 def test_period_hold_seconds_is_accepted_in_range():
     """A period may carry its own presence hold, overriding the zone's
     while it is active (the Dining Room's short daytime-walk-through hold).

@@ -54,6 +54,7 @@ __all__ = [
     "LuxConfig",
     "OverrideConfig",
     "Period",
+    "PresenceInput",
     "PeriodOverride",
     "ZoneConfig",
     "load_config",
@@ -128,6 +129,28 @@ class PeriodOverride:
 
 
 @dataclass(frozen=True)
+class PresenceInput:
+    """One presence device that is read by a named state, not as a sensor.
+
+    The default form of ``presence_devices`` is a bare id, and that device is
+    read the way a motion sensor is read (``onState`` and friends). Some
+    devices carry the same fact under another name -- a Texecom alarm zone
+    publishes ``status`` -- and wrapping them in a masquerade device purely to
+    change the type costs an extra hop on the path a light turns on (issue
+    #11). Declaring the state here reads the real device instead.
+
+    ``on_when`` is the value that counts as present. It is compared
+    permissively (see :func:`lamplighter.engine.presence_state_is_on`),
+    because Indigo plugins publish the same fact as ``True``, ``"true"`` and
+    ``1``, and a config author should not have to know which.
+    """
+
+    id: int
+    state: str
+    on_when: object = True
+
+
+@dataclass(frozen=True)
 class ZoneConfig:
     """One lighting zone as configured, before any device is looked up."""
 
@@ -145,6 +168,18 @@ class ZoneConfig:
     #: are unique house-wide, so the two lists must not repeat an id between
     #: them (checked in ``_zone`` below).
     presence_variables: tuple[int, ...] = ()
+    #: The subset of ``presence_devices`` that declared a state to read, in
+    #: config order. ``presence_devices`` still holds *every* presence device
+    #: id, plain or declared, so every membership test in the engine keeps
+    #: working unchanged; this only says how a given one is read.
+    presence_states: tuple[PresenceInput, ...] = ()
+
+    def presence_input(self, device_id):
+        """The :class:`PresenceInput` for this device, or None if it is plain."""
+        for entry in self.presence_states:
+            if entry.id == device_id:
+                return entry
+        return None
 
 
 @dataclass(frozen=True)
@@ -258,6 +293,58 @@ def _device_id(value, path):
 def _device_ids(value, path, min_items=0):
     items = _array(value, path, min_items=min_items, unique=True)
     return tuple(_device_id(item, f"{path}/{i}") for i, item in enumerate(items))
+
+
+_PRESENCE_ENTRY_KEYS = ("id", "state", "on_when")
+
+
+def _presence_devices(value, path):
+    """``presence_devices``: ids, or objects declaring the state to read.
+
+    Returns ``(ids, declared)`` -- every id in config order, and the
+    :class:`PresenceInput` entries among them. A malformed entry is rejected
+    with the path of the offending value, never quietly skipped: a presence
+    input the zone silently stopped reading is a zone that stops seeing the
+    room.
+    """
+    items = _array(value, path, min_items=0)
+    ids = []
+    declared = []
+    for index, item in enumerate(items):
+        item_path = f"{path}/{index}"
+        if isinstance(item, dict):
+            _object(item, item_path, required=("id", "state"), allowed=_PRESENCE_ENTRY_KEYS)
+            entry = PresenceInput(
+                id=_device_id(item["id"], f"{item_path}/id"),
+                state=_string(item["state"], f"{item_path}/state", max_length=64),
+                on_when=_on_when(item.get("on_when", True), f"{item_path}/on_when"),
+            )
+            ids.append(entry.id)
+            declared.append(entry)
+            continue
+        if isinstance(item, list):
+            _fail(item_path, f"expected a device id or an object, got {_kind(item)}")
+        ids.append(_device_id(item, item_path))
+    duplicates = sorted({item for item in ids if ids.count(item) > 1})
+    if duplicates:
+        _fail(
+            path,
+            f"{duplicates} appear more than once; each presence device may be "
+            "listed once, either as an id or as an object declaring the state "
+            "to read",
+        )
+    return tuple(ids), tuple(declared)
+
+
+def _on_when(value, path):
+    """The value that counts as present. Any JSON scalar; never null."""
+    if value is None or isinstance(value, (list, dict)):
+        _fail(
+            path,
+            f"expected a boolean, number or string -- the value this device's "
+            f"state has when the room is occupied -- got {_kind(value)}",
+        )
+    return value
 
 
 def _variable_id(value, path):
@@ -483,9 +570,11 @@ def _zone(raw, path, sun, today):
     _object(raw, path, required=_ZONE_REQUIRED, allowed=_ZONE_KEYS)
     name = _string(raw["name"], f"{path}/name", max_length=64)
     enabled = _bool(raw.get("enabled", True), f"{path}/enabled")
-    presence_devices = _device_ids(
-        raw["presence_devices"], f"{path}/presence_devices", min_items=1
+    presence_devices, presence_states = _presence_devices(
+        raw["presence_devices"], f"{path}/presence_devices"
     )
+    if not presence_devices:
+        _fail(f"{path}/presence_devices", "has 0 entries; at least 1 required")
     presence_variables = _variable_ids(
         raw.get("presence_variables", []), f"{path}/presence_variables"
     )
@@ -521,6 +610,7 @@ def _zone(raw, path, sun, today):
         enabled=enabled,
         override=override,
         presence_variables=presence_variables,
+        presence_states=presence_states,
     )
 
 

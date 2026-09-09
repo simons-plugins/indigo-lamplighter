@@ -77,8 +77,102 @@ class Edge:
     kind: str = ""
 
 
-def presence_reading(device) -> tuple:
+class UnknownPresence(Exception):
+    """A declared presence state could not be read (issue #11).
+
+    Raised only for the ``{"id": ..., "state": ...}`` form. Whatever the
+    cause, the answer is *unknown*, never "off": a zone that quietly stops
+    seeing a sensor is the failure this module is written around. The two
+    subclasses split it the way ``devices.py`` splits a lookup, because the
+    callers do different things with them.
+    """
+
+    def __init__(self, message, device_id, state):
+        super().__init__(message)
+        self.device_id = device_id
+        self.state = state
+
+    #: What the caller should do about it, in the warning it logs.
+    consequence = ""
+
+
+class PresenceStateMissing(UnknownPresence):
+    """The device is not saying: no such state, or the state is unset.
+
+    A misspelt state name looks exactly like this, and so does a device that
+    has simply not reported yet since a restart. Either way *this input* is
+    unknown while the zone's other inputs are fine, so it is skipped and the
+    zone runs on the rest -- unless it was the zone's only word on the room,
+    which :meth:`Engine._seed_zone` checks for.
+    """
+
+    def __init__(self, device_id, state, unset=False):
+        super().__init__(
+            f"device {device_id} "
+            + (
+                f"publishes {state!r} but it is unset"
+                if unset
+                else f"does not publish a state named {state!r}"
+            )
+            + ", so whether the room is occupied is unknown -- this is not 'off'",
+            device_id,
+            state,
+        )
+        self.unset = unset
+
+    consequence = (
+        "Check the state name against the device in Indigo -- though a device "
+        "that has not reported since a restart looks exactly the same."
+    )
+
+
+class PresenceStateUnreadable(UnknownPresence):
+    """The states container itself could not be read.
+
+    Not the same as :class:`PresenceStateMissing` and deliberately not
+    sharing its handler: nothing was learned about the state name, so this is
+    the presence equivalent of ``devices.LookupFailed`` -- retry, do not send
+    anyone off to check a spelling that is probably fine.
+    """
+
+    def __init__(self, device_id, state, cause):
+        super().__init__(
+            f"reading state {state!r} of device {device_id} failed: "
+            f"{type(cause).__name__}: {cause}. This says nothing about whether "
+            "the state name is right, and it is not 'off'",
+            device_id,
+            state,
+        )
+        self.cause = cause
+
+    consequence = (
+        "The device's states could not be read at all, so nothing was learned "
+        "about the state name and this is NOT evidence it is wrong."
+    )
+
+
+def presence_state_is_on(value, on_when) -> bool:
+    """Does this state value mean present?
+
+    Equal to ``on_when``, or equal once both are lower-cased strings. Indigo
+    plugins publish the same fact as ``True``, ``"true"``, ``"On"`` and ``1``
+    depending on the plugin, and the config author writing ``"on_when": true``
+    means all of them. ``True == 1`` in Python already, which is the one case
+    the string comparison would get wrong on its own.
+    """
+    if value == on_when:
+        return True
+    return str(value).strip().lower() == str(on_when).strip().lower()
+
+
+def presence_reading(device, declared=None) -> tuple:
     """The part of a presence device the zone actually reads.
+
+    With ``declared`` (a :class:`~lamplighter.config.PresenceInput`) the
+    reading is the single named state instead of the three sensor readings,
+    and a device that does not publish it -- or publishes it unset -- raises
+    :class:`PresenceStateMissing` rather than reading as off, exactly as the
+    sensor path below treats a ``None`` as "no reading" rather than as off.
 
     Three values, because on/off reaches this plugin three ways: the
     ``onState`` attribute the IOM documents, ``states["onState"]``, and
@@ -91,6 +185,23 @@ def presence_reading(device) -> tuple:
     raising: an unreadable snapshot must not take the callback thread down.
     """
     states = getattr(device, "states", None) or {}
+    if declared is not None:
+        device_id = getattr(device, "id", None)
+        try:
+            value = states[declared.state]
+        except KeyError:
+            raise PresenceStateMissing(device_id, declared.state) from None
+        except Exception as exc:
+            # Not a missing state: the container itself did not answer. Same
+            # rule as devices.py -- KeyError is "no such thing", anything
+            # else is "the lookup broke", and they must not share a handler.
+            raise PresenceStateUnreadable(device_id, declared.state, exc) from exc
+        if value is None:
+            # Present but unset. The sensor path below drops a None rather
+            # than reading it as False; the declared path must not be the one
+            # place where "has not reported yet" means "the room is empty".
+            raise PresenceStateMissing(device_id, declared.state, unset=True)
+        return (value,)
     return (
         getattr(device, "onState", None),
         states.get("onState"),
@@ -152,7 +263,7 @@ def light_level(device):
     return int(value)
 
 
-def presence_is_on(device) -> bool:
+def presence_is_on(device, declared=None) -> bool:
     """Is this presence device reporting? Any of the three readings, any-of.
 
     Any-of and not all-of, at both levels: across the readings of one device,
@@ -161,7 +272,72 @@ def presence_is_on(device) -> bool:
     does, because all-of turns a two-sensor room into a room that is never
     occupied.
     """
-    return any(bool(value) for value in presence_reading(device) if value is not None)
+    reading = presence_reading(device, declared)
+    if declared is not None:
+        return presence_state_is_on(reading[0], declared.on_when)
+    return any(bool(value) for value in reading if value is not None)
+
+
+def _previous_presence_reading(previous_dev, declared):
+    """The before-snapshot's reading, or a sentinel if it cannot be taken.
+
+    A previous device that does not publish the declared state cannot be
+    compared with the current one, and the gate must then not fire: missing a
+    real edge is the lights-never-respond failure, a redundant re-plan is not.
+    """
+    try:
+        return presence_reading(previous_dev, declared)
+    except UnknownPresence:
+        return _NO_READING
+
+
+class _NoReading:
+    """A stand-in for a reading that could not be taken.
+
+    Equal to nothing at all, itself included, so the "did the reading change"
+    gate can never suppress an edge because *both* sides were unreadable. A
+    bare ``object()`` would compare equal to itself and do exactly that the
+    first time someone hoisted this onto both sides of the comparison.
+    """
+
+    def __eq__(self, other):
+        return False
+
+    def __ne__(self, other):
+        return True
+
+    __hash__ = None
+
+
+#: See _previous_presence_reading.
+_NO_READING = _NoReading()
+
+
+def _unknown_presence_key(zone_name, device_id, state):
+    """One warning per zone, device and state name.
+
+    Keyed on all three because two zones may read the same device by
+    different states: keying on the device alone would let the first zone's
+    warning silence the second zone's different fault, and let one zone's
+    successful read clear a suppression on behalf of another.
+    """
+    return ("presence-state-unknown", zone_name, device_id, state)
+
+
+def warn_unknown_presence_once(logger, zone_name, exc, note="") -> bool:
+    """Warn once that a declared presence state could not be read.
+
+    The consequence comes from the exception, not the call site: what happens
+    next follows from *which* failure this is, and a message that describes
+    the other one sends a reader to check the wrong thing. ``note`` adds what
+    only the call site knows.
+    """
+    return compare.warn_once(
+        logger,
+        _unknown_presence_key(zone_name, exc.device_id, exc.state),
+        f"{zone_name}: presence input {exc.device_id} is UNKNOWN, not off -- "
+        f"{exc}. {exc.consequence}{(' ' + note) if note else ''}",
+    )
 
 
 class Engine:
@@ -307,9 +483,27 @@ class Engine:
     def _presence_changed(self, zone, previous_dev, current_dev, now):
         """Presence, gated on the reading rather than on the event (R4)."""
         device_id = current_dev.id
-        if previous_dev is not None and presence_reading(previous_dev) == presence_reading(
-            current_dev
-        ):
+        declared = zone.config.presence_input(device_id)
+        try:
+            reading = presence_reading(current_dev, declared)
+        except UnknownPresence as exc:
+            # Say so once and leave the zone's picture of this input alone:
+            # the last reading it did give stands, because "unknown" must not
+            # become "off" and empty the room (issue #11).
+            warn_unknown_presence_once(
+                self.logger,
+                zone.name,
+                exc,
+                note=(
+                    "On this event the input keeps the last reading it did "
+                    "give, so the zone may stay occupied (and its lights on) "
+                    "until the input reads again."
+                ),
+            )
+            return None
+        if previous_dev is not None and _previous_presence_reading(
+            previous_dev, declared
+        ) == reading:
             # The Occupatum countdown tick, the display string, the battery
             # level. Nothing the zone reads has moved.
             self.logger.debug(
@@ -320,7 +514,11 @@ class Engine:
         # No before-state means there is nothing to compare, and suppressing a
         # re-plan on a comparison that could not be made is a lights-never-
         # respond failure. The gate does not apply rather than guessing.
-        is_on = presence_is_on(current_dev)
+        if declared is not None:
+            compare.reset_warnings(
+                _unknown_presence_key(zone.name, device_id, declared.state)
+            )
+        is_on = presence_is_on(current_dev, declared)
         if not zone.ingest_presence(device_id, is_on, now):
             return None
         if self.history is not None:
@@ -530,6 +728,11 @@ class Engine:
         direction, and a zone whose lux sensor is broken must still run.
         """
         readable = True
+        #: How many presence inputs gave an answer this pass, and how many
+        #: were unknown. A zone where nothing answered knows nothing about
+        #: the room and must not be seeded as empty (see below).
+        answered = 0
+        unknown_inputs = 0
         for device_id in zone.config.presence_devices:
             try:
                 device = devices.get_device(device_id)
@@ -541,7 +744,40 @@ class Engine:
                 readable = False
                 continue
             devices.forget_warnings(device_id)
-            if presence_is_on(device):
+            declared = zone.config.presence_input(device_id)
+            try:
+                is_on = presence_is_on(device, declared)
+            except PresenceStateUnreadable as exc:
+                # The states container did not answer. Same rule as
+                # LookupFailed just above: nothing was learned, so the zone
+                # stays unseeded and is retried rather than seeded as empty.
+                warn_unknown_presence_once(
+                    self.logger,
+                    zone.name,
+                    exc,
+                    note="The zone is left unseeded and the pass is retried.",
+                )
+                readable = False
+                continue
+            except PresenceStateMissing as exc:
+                # The device is not saying -- a wrong state name, or a device
+                # that has not reported since the restart. That is one input,
+                # not the room: the zone seeds on its others. Only if NOTHING
+                # answered is the room unknown, which is checked below.
+                warn_unknown_presence_once(
+                    self.logger,
+                    zone.name,
+                    exc,
+                    note="This input is skipped; the zone seeds on its others.",
+                )
+                unknown_inputs += 1
+                continue
+            answered += 1
+            if declared is not None:
+                compare.reset_warnings(
+                    _unknown_presence_key(zone.name, device_id, declared.state)
+                )
+            if is_on:
                 # This is what rebuilds `presence.on_devices` after a restart.
                 # Only `last_seen` is persisted (R13); who is reporting *now*
                 # is a fact about the room, so it is read from the room. A
@@ -576,6 +812,7 @@ class Engine:
                 readable = False
                 continue
             devices.forget_warnings(var_id, kind="variable")
+            answered += 1
             if variable_is_on(getattr(variable, "value", None)):
                 # Same R-seed rule as a presence device: a zone enabled while
                 # the phone-presence variable already reads "true" starts
@@ -586,6 +823,19 @@ class Engine:
                     self._record(self.history.record_presence, zone.name, now, var_id, "variable", True)
             else:
                 zone.presence.last_value[var_id] = False  # same as the device case above
+
+        if unknown_inputs and not answered:
+            # Every presence input this zone has is unknown. Seeding it now
+            # would write "nobody here" from a set of readings nobody took,
+            # and the zone would turn its lights off on an occupied room.
+            # Left unseeded and retried, like a failed lookup.
+            self.logger.warning(
+                f"{zone.name}: none of this zone's {unknown_inputs} presence "
+                "input(s) could be read, so the room is UNKNOWN, not empty. The "
+                "zone is left unseeded and retried; it does not run until one "
+                "of them answers."
+            )
+            readable = False
 
         zone.read_lux(now)
 
