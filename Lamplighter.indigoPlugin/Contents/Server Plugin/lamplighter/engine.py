@@ -352,6 +352,7 @@ class Engine:
         clock=None,
         on_zone_changed=None,
         history=None,
+        on_dirty=None,
     ):
         self.config = config
         self.sun = sun
@@ -362,6 +363,15 @@ class Engine:
         #: its state and publish its Indigo device states without the engine
         #: knowing that Indigo devices exist.
         self.on_zone_changed = on_zone_changed
+        #: Called with no arguments whenever a zone is newly marked dirty, so
+        #: the plugin's worker can stop waiting for its next tick and act on
+        #: the edge now (issue #13). Only real input edges reach `_mark_dirty`
+        #: -- an Occupatum-style "on, on, on" tick is filtered out well before
+        #: it -- so this cannot reintroduce the fork's re-plan storm (R4).
+        #: Optional, and never load-bearing: the periodic tick remains the
+        #: backstop, so a signal that is missed or that raises costs latency
+        #: and never correctness.
+        self.on_dirty = on_dirty
         #: A :class:`lamplighter.history.History`, or None to record nothing.
         #: Optional because every promise file builds an ``Engine`` directly
         #: and none of them is about history -- a required parameter there
@@ -1113,8 +1123,20 @@ class Engine:
         that is worth logging is the one that actually moved an input, not
         whichever event happened to arrive last before the worker woke up.
         """
-        if zone.name not in self._dirty:
+        newly_dirty = zone.name not in self._dirty
+        if newly_dirty:
             self._dirty[zone.name] = cause
+        if newly_dirty and self.on_dirty is not None:
+            # On the callback thread. A failure to wake the worker must not
+            # reach the caller: the zone is already marked, and the periodic
+            # tick will pick it up a fraction of a second later.
+            try:
+                self.on_dirty()
+            except Exception:
+                self.logger.exception(
+                    "Lamplighter: waking the worker raised; the zone is still "
+                    "marked and the next tick will evaluate it"
+                )
         return Edge(zone=zone.name, cause=cause, kind=kind)
 
     def _record(self, fn, *args) -> None:

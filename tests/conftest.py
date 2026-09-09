@@ -165,6 +165,12 @@ class PluginBase:
         #: How many sleeps to allow before StopThread. One pass by default:
         #: no test ever waits, and none of them can loop for ever either.
         self.stop_after_sleeps = 1
+        #: What the real base sets on a stop request, and what its `sleep`
+        #: checks before doing anything else.
+        self.stop_thread = False
+
+    def stopConcurrentThread(self):
+        self.stop_thread = True
 
     def deviceUpdated(self, orig_dev, new_dev):
         return None
@@ -173,7 +179,13 @@ class PluginBase:
         return None
 
     def sleep(self, seconds):
-        """Record the delay and never actually sleep."""
+        """Record the delay and never actually sleep.
+
+        Like the real base, a stop request raises before anything else -- the
+        worker's `_wait` calls `sleep(0)` purely for that check.
+        """
+        if self.stop_thread:
+            raise self.StopThread()
         self.slept.append(seconds)
         if len(self.slept) >= self.stop_after_sleeps:
             raise self.StopThread()
