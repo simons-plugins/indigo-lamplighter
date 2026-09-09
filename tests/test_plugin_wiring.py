@@ -782,11 +782,16 @@ def test_the_worker_waits_no_longer_than_the_delay_when_nothing_wakes_it(install
 
 def test_stopping_the_worker_wakes_it(install):
     """Kills: shutdown taking a whole tick because the stop pipe the base
-    class writes to is not what `_wait` is waiting on any more."""
+    class writes to is not what `_wait` is waiting on any more.
+
+    Called by its snake_case name deliberately: that is the one Indigo's
+    `_pre_shutdown` calls, and an override of the camelCase alias alone --
+    which is what this first shipped as -- is never reached there.
+    """
     the_plugin = started(a_document())
 
     the_plugin._wake.clear()
-    the_plugin.stopConcurrentThread()
+    the_plugin.stop_concurrent_thread()
 
     assert the_plugin._wake.is_set()
     assert the_plugin.stop_thread

@@ -262,7 +262,7 @@ class Plugin(indigo.PluginBase):
         #: Set by the engine (on the Indigo callback thread) when a zone is
         #: newly marked dirty, so the worker stops waiting and acts on the
         #: edge now rather than up to MAX_LOOP_SECONDS later (issue #13).
-        #: Also set by `stopConcurrentThread`, so shutdown stays as prompt as
+        #: Also set by `stop_concurrent_thread`, so shutdown stays as prompt as
         #: `self.sleep`'s own stop-pipe made it.
         self._wake = threading.Event()
         self.config_file = None
@@ -534,7 +534,7 @@ class Plugin(indigo.PluginBase):
         that entirely for real input edges.
 
         Shutdown is the constraint this has to keep: `self.sleep` raises
-        `StopThread`, and that is how the worker ends. `stopConcurrentThread`
+        `StopThread`, and that is how the worker ends. `stop_concurrent_thread`
         below sets `_wake` too, so a stop returns from the wait at once, and
         the `self.sleep(0)` here is what turns it into the `StopThread` the
         loop is already catching -- a zero sleep does nothing else.
@@ -543,12 +543,18 @@ class Plugin(indigo.PluginBase):
             self._wake.wait(delay)
         self.sleep(0)
 
-    def stopConcurrentThread(self):
+    def stop_concurrent_thread(self):
         # The base class writes to its own stop pipe, which is what makes
         # `self.sleep` return; `_wait` is waiting on `_wake` instead, so it
         # needs telling as well or shutdown would take up to a tick.
-        super().stopConcurrentThread()
+        #
+        # Defined under the SNAKE_CASE name and aliased below, exactly as the
+        # base does it: Indigo's `_pre_shutdown` calls `stop_concurrent_thread`
+        # directly, so overriding the camelCase alias alone -- which is what
+        # this first shipped as -- is never reached on the real shutdown path.
+        super().stop_concurrent_thread()
         self._wake.set()
+    stopConcurrentThread = stop_concurrent_thread
 
     def _loop_delay(self, now) -> float:
         """How long to sleep: the engine's next wake, capped and floored."""

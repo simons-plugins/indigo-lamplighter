@@ -169,8 +169,13 @@ class PluginBase:
         #: checks before doing anything else.
         self.stop_thread = False
 
-    def stopConcurrentThread(self):
+    def stop_concurrent_thread(self):
         self.stop_thread = True
+    #: The real base defines the snake_case name and aliases the camelCase
+    #: one, and its `_pre_shutdown` calls the snake_case name -- so an
+    #: override of the alias alone would never run. The fake mirrors that or
+    #: it cannot catch the mistake.
+    stopConcurrentThread = stop_concurrent_thread
 
     def deviceUpdated(self, orig_dev, new_dev):
         return None
