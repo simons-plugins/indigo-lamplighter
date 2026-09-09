@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import re
+import threading
 
 try:
     import indigo
@@ -98,7 +99,10 @@ CONFIG_CHECK_SECONDS = 5.0
 #: The longest the worker loop sleeps. The engine's own timers can be much
 #: further out, but a dirty zone marked on the callback thread is only picked
 #: up when the worker next wakes, so the loop caps its sleep at a second and
-#: the cost of that is one no-op pass per second per plugin.
+#: the cost of that is one no-op pass per second per plugin. Since issue #13
+#: this cap is the BACKSTOP, not the latency: an edge sets `_wake` and the
+#: worker stops waiting immediately, and the cap only matters when a wake is
+#: missed.
 MAX_LOOP_SECONDS = 1.0
 
 #: The shortest. Without a floor, a zone that re-dirties itself would spin the
@@ -255,6 +259,12 @@ class Plugin(indigo.PluginBase):
 
         self.engine = None
         self.sun = None
+        #: Set by the engine (on the Indigo callback thread) when a zone is
+        #: newly marked dirty, so the worker stops waiting and acts on the
+        #: edge now rather than up to MAX_LOOP_SECONDS later (issue #13).
+        #: Also set by `stop_concurrent_thread`, so shutdown stays as prompt as
+        #: `self.sleep`'s own stop-pipe made it.
+        self._wake = threading.Event()
         self.config_file = None
         self._config_mtime = None
         self._config_checked_at = None
@@ -352,6 +362,7 @@ class Plugin(indigo.PluginBase):
             logger=self.logger,
             on_zone_changed=self._zone_changed,
             history=self.history,
+            on_dirty=self._wake.set,
         )
         if loaded:
             self._record_config_loaded(config, dt.datetime.now())
@@ -489,6 +500,11 @@ class Plugin(indigo.PluginBase):
                     # just declines to raise once a second on top of it.
                     self.sleep(MAX_LOOP_SECONDS)
                     continue
+                # Before the drain, not after: an edge classified while this
+                # pass is running then survives as a set event and costs one
+                # extra no-op pass, where clearing afterwards would swallow it
+                # and make the zone wait for the periodic tick after all.
+                self._wake.clear()
                 now = dt.datetime.now()
                 try:
                     # One bad pass must not end the worker: the next tick is a
@@ -504,9 +520,41 @@ class Plugin(indigo.PluginBase):
                     self._write_history(dt.datetime.now())
                 except Exception:
                     self.logger.exception("Lamplighter: the worker pass raised")
-                self.sleep(self._loop_delay(dt.datetime.now()))
+                self._wait(self._loop_delay(dt.datetime.now()))
         except self.StopThread:
             pass
+
+    def _wait(self, delay: float) -> None:
+        """Sleep for `delay`, but no longer than the next edge (issue #13).
+
+        `self.sleep` cannot be interrupted by anything but a stop, so a zone
+        that saw presence a millisecond after the worker went to sleep waited
+        out the whole remaining tick -- 0.5 s on average, 1.0 s at worst,
+        against ~25 ms of actual work. Waiting on `_wake` instead removes
+        that entirely for real input edges.
+
+        Shutdown is the constraint this has to keep: `self.sleep` raises
+        `StopThread`, and that is how the worker ends. `stop_concurrent_thread`
+        below sets `_wake` too, so a stop returns from the wait at once, and
+        the `self.sleep(0)` here is what turns it into the `StopThread` the
+        loop is already catching -- a zero sleep does nothing else.
+        """
+        if delay > 0:
+            self._wake.wait(delay)
+        self.sleep(0)
+
+    def stop_concurrent_thread(self):
+        # The base class writes to its own stop pipe, which is what makes
+        # `self.sleep` return; `_wait` is waiting on `_wake` instead, so it
+        # needs telling as well or shutdown would take up to a tick.
+        #
+        # Defined under the SNAKE_CASE name and aliased below, exactly as the
+        # base does it: Indigo's `_pre_shutdown` calls `stop_concurrent_thread`
+        # directly, so overriding the camelCase alias alone -- which is what
+        # this first shipped as -- is never reached on the real shutdown path.
+        super().stop_concurrent_thread()
+        self._wake.set()
+    stopConcurrentThread = stop_concurrent_thread
 
     def _loop_delay(self, now) -> float:
         """How long to sleep: the engine's next wake, capped and floored."""

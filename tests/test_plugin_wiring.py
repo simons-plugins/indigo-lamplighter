@@ -698,17 +698,175 @@ def test_one_worker_pass_publishes_states_and_the_controller_counters(install):
     assert device_for("Hallway").states["explain"]
 
 
+class RecordingWake:
+    """Stands in for the worker's `threading.Event`, recording the timeouts.
+
+    The worker no longer passes its delay to `self.sleep` -- it waits on the
+    event with that timeout instead (issue #13) -- so this is where the loop
+    delay is observable.
+    """
+
+    def __init__(self, returns=False):
+        self.waits = []
+        self.clears = 0
+        self.returns = returns
+        self.flag = False
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        return self.returns
+
+    def is_set(self):
+        return self.flag
+
+    def set(self):
+        self.flag = True
+
+    def clear(self):
+        self.clears += 1
+        self.flag = False
+
+
 def test_the_worker_sleep_is_bounded_at_both_ends(install):
     """Kills: sleeping until the engine's next wake-up (which can be hours,
     and leaves a dirty zone waiting), and sleeping zero (which spins)."""
     the_plugin = started(a_document())
     the_plugin.stop_after_sleeps = 1
+    wake = RecordingWake()
+    the_plugin._wake = wake
 
     the_plugin.runConcurrentThread()
 
-    assert the_plugin.slept
-    for delay in the_plugin.slept:
+    assert wake.waits
+    for delay in wake.waits:
         assert plugin_module.MIN_LOOP_SECONDS <= delay <= plugin_module.MAX_LOOP_SECONDS
+
+
+def test_an_input_edge_wakes_the_worker_rather_than_waiting_for_the_tick(install):
+    """Kills issue #13: a zone that sees presence a millisecond after the
+    worker went to sleep waiting out the rest of the tick -- 0.5 s on average
+    against ~25 ms of work -- because nothing could interrupt `self.sleep`."""
+    the_plugin = started(a_document())
+    the_plugin.engine.tick(NOW)
+
+    the_plugin._wake.clear()
+    before = make_snapshot(101, device_cls="relay", name="Hallway Motion", onState=False)
+    after = make_device(101, "relay", name="Hallway Motion", onState=True)
+    the_plugin.deviceUpdated(before, after)
+
+    assert the_plugin._wake.is_set()
+
+
+def test_a_no_change_update_does_not_wake_the_worker(install):
+    """Kills the R4 regression this could reintroduce: an Occupatum-style
+    "on, on, on" tick waking the worker hundreds of times an hour."""
+    the_plugin = started(a_document())
+    the_plugin.engine.tick(NOW)
+
+    the_plugin._wake.clear()
+    before = make_snapshot(101, device_cls="relay", name="Hallway Motion", onState=True)
+    after = make_device(101, "relay", name="Hallway Motion", onState=True)
+    the_plugin.deviceUpdated(before, after)
+
+    assert the_plugin.engine.dirty == {}
+    assert not the_plugin._wake.is_set()
+
+
+def test_the_worker_clears_its_wake_every_pass(install):
+    """Kills: never clearing the wake at all, which is not a latency bug but
+    an unbounded hot loop -- once any edge sets the event, every wait returns
+    at once for the life of the plugin.
+
+    Separate from the ordering test below: a never-cleared event is trivially
+    still set at the end of a pass, so that test cannot see this one.
+    """
+    the_plugin = started(a_document())
+    the_plugin.stop_after_sleeps = 2
+    wake = RecordingWake()
+    the_plugin._wake = wake
+
+    the_plugin.runConcurrentThread()
+
+    assert wake.clears == 2
+
+
+def test_the_worker_never_sleeps_a_delay_it_cannot_be_woken_from(install):
+    """Kills the whole point of issue #13: waiting on the event and THEN
+    sleeping the delay anyway, which passes every "was the event set?" test
+    while the zone still waits out the full tick.
+
+    The only `self.sleep` the loop may make is the zero-second stop check.
+    """
+    the_plugin = started(a_document())
+    the_plugin.stop_after_sleeps = 1
+
+    the_plugin.runConcurrentThread()
+
+    assert the_plugin.slept == [0]
+
+
+def test_an_edge_gets_its_pass_without_waiting_out_the_clock(install):
+    """Kills: an edge classified during a pass still costing a real sleep
+    before it is evaluated. The second pass here happens because the event
+    is set, not because any time passed -- nothing advances the clock.
+    """
+    the_plugin = started(a_document())
+    the_plugin.stop_after_sleeps = 2
+    ticks = []
+    real_tick = the_plugin.engine.tick
+    zone = the_plugin.engine.zones["Hallway"]
+
+    def tick_and_dirty(now):
+        ticks.append(now)
+        summary = real_tick(now)
+        if len(ticks) == 1:
+            the_plugin.engine._mark_dirty(zone, "presence: mid-pass", kind="presence")
+        return summary
+
+    the_plugin.engine.tick = tick_and_dirty
+    the_plugin.runConcurrentThread()
+
+    assert len(ticks) == 2
+    assert the_plugin.slept == [0, 0]
+
+
+def test_stopping_the_worker_wakes_it(install):
+    """Kills: shutdown taking a whole tick because the stop pipe the base
+    class writes to is not what `_wait` is waiting on any more.
+
+    Called by its snake_case name deliberately: that is the one Indigo's
+    `_pre_shutdown` calls, and an override of the camelCase alias alone --
+    which is what this first shipped as -- is never reached there.
+    """
+    the_plugin = started(a_document())
+
+    the_plugin._wake.clear()
+    the_plugin.stop_concurrent_thread()
+
+    assert the_plugin._wake.is_set()
+    assert the_plugin.stop_thread
+    with pytest.raises(the_plugin.StopThread):
+        the_plugin._wait(1.0)
+
+
+def test_the_worker_clears_its_wake_before_the_pass_not_after(install):
+    """Kills: an edge classified WHILE a pass runs being cleared away after
+    it, so the zone waits for the periodic tick after all -- the one case
+    where a lost wake would cost more than the latency it was meant to save."""
+    the_plugin = started(a_document())
+    the_plugin.stop_after_sleeps = 1
+    zone = the_plugin.engine.zones["Hallway"]
+    real_tick = the_plugin.engine.tick
+
+    def tick_and_dirty(now):
+        summary = real_tick(now)
+        the_plugin.engine._mark_dirty(zone, "presence: mid-pass", kind="presence")
+        return summary
+
+    the_plugin.engine.tick = tick_and_dirty
+    the_plugin.runConcurrentThread()
+
+    assert the_plugin._wake.is_set()
 
 
 def test_a_worker_pass_that_raises_does_not_end_the_worker(install, caplog):
