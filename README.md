@@ -191,7 +191,13 @@ a complete file):
 The pieces:
 
 - **`presence_devices`** are any Indigo devices with an on/off state,
-  combined any-of. **`presence_variables`** are Indigo variables that count
+  combined any-of. An entry may instead be an object naming the state to
+  read -- `{"id": 1408042345, "state": "status", "on_when": true}` -- for a
+  device that carries presence under another name, such as a Texecom alarm
+  zone. That removes the masquerade device such a sensor would otherwise
+  need, and the hop it costs when a light turns on. A device that does not
+  publish the named state is an *unknown* input, warned about once and
+  skipped; it is never read as "off". **`presence_variables`** are Indigo variables that count
   as presence when their value is `true`, `on`, `yes`, `1` or `home`, which
   is how a phone-at-home variable can hold a bedroom.
 - **`lux`** is the daylight gate, or `null` for none. `dark_below_variable_id`
