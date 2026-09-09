@@ -1719,7 +1719,7 @@ def test_a_reload_that_removes_a_zone_survives_a_history_forget_failure():
     assert set(engine.zones) == {"Study"}
 
 
-def test_a_wake_callback_that_raises_leaves_the_zone_dirty_and_the_event_handled():
+def test_a_wake_callback_that_raises_leaves_the_zone_dirty_and_the_event_handled(caplog):
     """Kills issue #13's degradation clause: the worker wake-up is latency
     only, so a callback that raises must not reach the Indigo callback thread
     and must not cost the mark that the periodic tick will act on."""
@@ -1732,9 +1732,13 @@ def test_a_wake_callback_that_raises_leaves_the_zone_dirty_and_the_event_handled
     engine.tick(EVENING)
     assert engine.dirty == {}
 
-    engine.device_updated(*presence(101, False, True), EVENING)
+    with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
+        engine.device_updated(*presence(101, False, True), EVENING)
 
     assert "presence" in engine.dirty.get("Kitchen", "")
+    # The log line IS the payload here: a wake path that fails silently
+    # fails for ever, and nothing else in the house would ever say so.
+    assert any("waking the worker" in r.getMessage() for r in caplog.records)
 
 
 def test_only_a_new_mark_wakes_the_worker():

@@ -708,18 +708,23 @@ class RecordingWake:
 
     def __init__(self, returns=False):
         self.waits = []
+        self.clears = 0
         self.returns = returns
-        self.is_set_flag = False
+        self.flag = False
 
     def wait(self, timeout=None):
         self.waits.append(timeout)
         return self.returns
 
+    def is_set(self):
+        return self.flag
+
     def set(self):
-        self.is_set_flag = True
+        self.flag = True
 
     def clear(self):
-        self.is_set_flag = False
+        self.clears += 1
+        self.flag = False
 
 
 def test_the_worker_sleep_is_bounded_at_both_ends(install):
@@ -767,17 +772,62 @@ def test_a_no_change_update_does_not_wake_the_worker(install):
     assert not the_plugin._wake.is_set()
 
 
-def test_the_worker_waits_no_longer_than_the_delay_when_nothing_wakes_it(install):
-    """The wait is a real one: a pass with no edge still yields, or the
-    worker would spin at whatever rate the CPU allows."""
+def test_the_worker_clears_its_wake_every_pass(install):
+    """Kills: never clearing the wake at all, which is not a latency bug but
+    an unbounded hot loop -- once any edge sets the event, every wait returns
+    at once for the life of the plugin.
+
+    Separate from the ordering test below: a never-cleared event is trivially
+    still set at the end of a pass, so that test cannot see this one.
+    """
     the_plugin = started(a_document())
-    the_plugin.stop_after_sleeps = 1
+    the_plugin.stop_after_sleeps = 2
     wake = RecordingWake()
     the_plugin._wake = wake
 
     the_plugin.runConcurrentThread()
 
-    assert all(delay > 0 for delay in wake.waits)
+    assert wake.clears == 2
+
+
+def test_the_worker_never_sleeps_a_delay_it_cannot_be_woken_from(install):
+    """Kills the whole point of issue #13: waiting on the event and THEN
+    sleeping the delay anyway, which passes every "was the event set?" test
+    while the zone still waits out the full tick.
+
+    The only `self.sleep` the loop may make is the zero-second stop check.
+    """
+    the_plugin = started(a_document())
+    the_plugin.stop_after_sleeps = 1
+
+    the_plugin.runConcurrentThread()
+
+    assert the_plugin.slept == [0]
+
+
+def test_an_edge_gets_its_pass_without_waiting_out_the_clock(install):
+    """Kills: an edge classified during a pass still costing a real sleep
+    before it is evaluated. The second pass here happens because the event
+    is set, not because any time passed -- nothing advances the clock.
+    """
+    the_plugin = started(a_document())
+    the_plugin.stop_after_sleeps = 2
+    ticks = []
+    real_tick = the_plugin.engine.tick
+    zone = the_plugin.engine.zones["Hallway"]
+
+    def tick_and_dirty(now):
+        ticks.append(now)
+        summary = real_tick(now)
+        if len(ticks) == 1:
+            the_plugin.engine._mark_dirty(zone, "presence: mid-pass", kind="presence")
+        return summary
+
+    the_plugin.engine.tick = tick_and_dirty
+    the_plugin.runConcurrentThread()
+
+    assert len(ticks) == 2
+    assert the_plugin.slept == [0, 0]
 
 
 def test_stopping_the_worker_wakes_it(install):
