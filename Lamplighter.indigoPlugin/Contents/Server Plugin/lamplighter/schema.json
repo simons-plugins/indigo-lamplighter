@@ -44,7 +44,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["id", "state"],
-          "description": "A presence device read by a named state rather than as a motion sensor. A device that does not publish the named state is an UNKNOWN input, not an empty room: it is warned about once and skipped, never folded into 'off'.",
+          "description": "A presence device read by a named state rather than as a motion sensor. A device that does not publish the named state, or publishes it unset, is an UNKNOWN input, not an empty room: it is warned about once and skipped, the zone runs on its other inputs, and a zone whose inputs all read unknown is left unseeded and retried rather than started empty. Never folded into 'off'.",
           "properties": {
             "id": { "$ref": "#/$defs/device_id" },
             "state": {

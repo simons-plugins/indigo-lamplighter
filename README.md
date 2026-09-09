@@ -196,8 +196,10 @@ The pieces:
   device that carries presence under another name, such as a Texecom alarm
   zone. That removes the masquerade device such a sensor would otherwise
   need, and the hop it costs when a light turns on. A device that does not
-  publish the named state is an *unknown* input, warned about once and
-  skipped; it is never read as "off". **`presence_variables`** are Indigo variables that count
+  publish the named state -- or publishes it unset -- is an *unknown* input,
+  never "off": it is warned about once and skipped, the zone runs on its
+  other inputs, and a zone where **nothing** answered is left unseeded and
+  retried rather than started as an empty room. **`presence_variables`** are Indigo variables that count
   as presence when their value is `true`, `on`, `yes`, `1` or `home`, which
   is how a phone-at-home variable can hold a bedroom.
 - **`lux`** is the daylight gate, or `null` for none. `dark_below_variable_id`

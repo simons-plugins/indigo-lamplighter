@@ -175,14 +175,13 @@ def test_the_same_device_may_not_be_listed_twice_in_either_form():
     assert "more than once" in str(raised.value)
 
 
-def test_an_unreadable_declared_state_at_seeding_leaves_the_zone_unseeded():
+def test_a_zone_whose_only_presence_input_is_unknown_is_left_unseeded():
     """The degradation path. A device that does not publish the named state
-    says NOTHING about the room, so the zone must be retried -- exactly like
-    a failed Indigo lookup -- not seeded as empty.
+    says NOTHING about the room; with no other input answering, seeding the
+    zone would write "nobody here" from a reading nobody took.
 
-    Kills: `except UnreadablePresenceState: continue` without setting
-    `readable = False`, which seeds the zone with an empty room and then
-    turns the lights off in an occupied one.
+    Kills: seeding a zone whose inputs all failed to read. It starts VACANT
+    and turns the lights off in an occupied room.
     """
     make_device(101, "device", name="Kitchen PIR", state_of_zone=True)  # not "status"
     make_device(201, "dimmer", name="Kitchen Pendant")
@@ -196,8 +195,81 @@ def test_an_unreadable_declared_state_at_seeding_leaves_the_zone_unseeded():
         logger.removeHandler(recorder)
 
     assert engine.zones["Kitchen"].presence.last_value == {}, "unknown is not 'off'"
-    assert any("does not publish the state 'status'" in m for m in recorder.messages)
+    assert any("does not publish a state named 'status'" in m for m in recorder.messages)
     assert any("UNKNOWN, not off" in m for m in recorder.messages)
+    assert any("left unseeded" in m for m in recorder.messages), (
+        "the warning must say what this caller did"
+    )
+
+
+def test_one_unknown_input_does_not_hold_back_a_zone_that_has_another():
+    """The other half of the same rule: an unknown input is one input, not
+    the room. A zone with a working PIR alongside a misspelt alarm-zone entry
+    still seeds and still runs.
+
+    Kills: `readable = False` on a missing state, which leaves a zone with a
+    perfectly good sensor permanently unseeded -- warned once, then silent,
+    with its lights never automated again.
+    """
+    make_device(101, "device", name="Kitchen PIR", state_of_zone=True)  # not "status"
+    make_device(102, "sensor", name="Kitchen Radar", onState=True)
+    make_device(201, "dimmer", name="Kitchen Pendant")
+    engine = an_engine([ALARM_ZONE, 102])
+    zone = engine.zones["Kitchen"]
+
+    assert engine.seed_inputs(NOW) == (), "the radar answered; the zone can run"
+    assert zone.presence.on_devices == {102}
+    engine.mark_all_dirty("startup")
+    engine.tick(NOW)
+    assert zone.state is ZoneState.OCCUPIED
+
+
+def test_a_state_that_is_present_but_unset_is_unknown_not_off():
+    """A device that publishes the state but has not filled it in yet is the
+    restart case, and it must read the way the sensor path reads a None: no
+    reading at all.
+
+    Kills: `presence_state_is_on(None, True)` -> False, which turns "has not
+    reported yet" into a confident empty room.
+    """
+    make_device(101, "device", name="Kitchen PIR", status=None)
+    make_device(201, "dimmer", name="Kitchen Pendant")
+    engine = an_engine([ALARM_ZONE])
+
+    assert engine.seed_inputs(NOW) == ("Kitchen",)
+    assert engine.zones["Kitchen"].presence.last_value == {}, "None is not 'off'"
+
+
+def test_a_broken_states_container_is_not_reported_as_a_wrong_state_name():
+    """The two-failure rule, inside one device: a `states` that cannot be
+    subscripted at all says nothing about the state NAME.
+
+    Kills: `except (KeyError, TypeError)`, which sends a reader off to check
+    a spelling that is fine while a plugin is mid-reload.
+    """
+
+    class Broken:
+        id = 101
+        name = "Kitchen PIR"
+        states = 17  # not subscriptable
+
+    recorder = Recorder()
+    logger = logging.getLogger("test.presence_state.broken")
+    logger.addHandler(recorder)
+    make_device(201, "dimmer", name="Kitchen Pendant")
+    engine = an_engine([ALARM_ZONE], logger=logger)
+    import indigo
+
+    indigo.devices[101] = Broken()
+    try:
+        assert engine.seed_inputs(NOW) == ("Kitchen",)
+    finally:
+        logger.removeHandler(recorder)
+
+    assert any("NOT evidence it is wrong" in m for m in recorder.messages), (
+        recorder.messages
+    )
+    assert not any("does not publish a state named" in m for m in recorder.messages)
 
 
 def test_an_unreadable_declared_state_at_an_edge_does_not_empty_the_room():
@@ -226,4 +298,7 @@ def test_an_unreadable_declared_state_at_an_edge_does_not_empty_the_room():
         logger.removeHandler(recorder)
 
     assert zone.presence.on_devices == {101}, "unknown must not clear the room"
-    assert any("does not publish the state 'status'" in m for m in recorder.messages)
+    assert any("does not publish a state named 'status'" in m for m in recorder.messages)
+    assert any("keeps the last reading" in m for m in recorder.messages), (
+        "an operator must be told the zone may stay occupied on a stale reading"
+    )
