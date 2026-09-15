@@ -1782,18 +1782,24 @@ def test_startup_loads_an_existing_history_file(install):
     import json
     import os
 
+    # Plugin startup loads with the real clock (dt.datetime.now()), which
+    # prunes anything older than RETENTION_HOURS (48h) -- so the event here
+    # must stay relative to now, not a hardcoded date, or it silently ages
+    # out of the retention window.
+    recent = (dt.datetime.now() - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+
     path = plugin_module.Plugin._history_path(str(install))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(
             {
                 "version": 1,
-                "generated_at": "2026-09-08T12:00:00",
+                "generated_at": recent,
                 "retention_hours": 48,
                 "zones": {
                     "Hallway": {
                         "events": [
-                            {"t": "2026-09-08T12:00:00", "k": "state", "to": "occupied"}
+                            {"t": recent, "k": "state", "to": "occupied"}
                         ]
                     }
                 },
