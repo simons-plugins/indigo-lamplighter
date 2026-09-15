@@ -78,7 +78,6 @@ PERSIST_PREFIX = "persist_"
 PERSIST_KEYS = (
     "version",
     "presence_last_seen",
-    "presence_confirmed_vacant_last_seen",
     "dark",
     "override_device",
     "override_since",

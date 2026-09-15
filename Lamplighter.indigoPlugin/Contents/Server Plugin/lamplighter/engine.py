@@ -869,13 +869,13 @@ class Engine:
                     self._record(self.history.record_light, zone.name, now, device_id, level)
 
         if readable:
-            # would_be_active, not active: a debug line must not itself
-            # confirm a hold expired ahead of the zone's first real
-            # evaluation (issue #15) -- see Presence.active vs
-            # Presence.would_be_active.
+            # Zone.presence_active is stateless (issue #15), so a debug line
+            # asking it before the zone's first real evaluation cannot
+            # confirm anything ahead of time -- there is nothing left to
+            # confirm.
             self.logger.debug(
                 f"{zone.name}: inputs seeded from the devices themselves -- presence "
-                f"{'active' if zone.presence.would_be_active(now, zone.hold_seconds(now)) else 'inactive'}"
+                f"{'active' if zone.presence_active(now) else 'inactive'}"
                 f" (last seen {zone.presence.last_seen or 'never'}), "
                 f"lux {zone.lux.value if zone.lux.value is not None else 'unread'}"
             )
@@ -936,7 +936,7 @@ class Engine:
         override = zone.override
         if override is not None and override.expires_at <= now:
             return "override expiry"
-        hold_expiry = zone.presence.expiry(zone.hold_seconds(now))
+        hold_expiry = zone.presence_expiry()
         if hold_expiry is not None and hold_expiry <= now:
             return "presence hold expired"
         period = zone.active_period(now)

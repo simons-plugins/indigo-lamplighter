@@ -25,27 +25,33 @@ So the state lives in two places and both matter:
   "on" reading *and on an "off" one*, because the hold is a delay after the
   room clears, not a delay after the last sighting.
 
-``last_seen`` and :attr:`confirmed_vacant_last_seen` are persisted (R13). The
-reporting set is rebuilt at startup by
+``last_seen`` is persisted (R13). The reporting set is rebuilt at startup by
 :meth:`lamplighter.engine.Engine._seed_zone` reading the devices themselves,
 because who is on *now* is a fact about the room and not about what the
 plugin believed when it stopped.
 
-**A period boundary must not revive an expired hold (issue #15).**
-``hold_seconds`` can change at a period boundary (a period may carry its own,
-overriding the zone's while it is active), and the hold judged is always the
-one for the period active *now* -- so a boundary can lengthen or shorten a
-hold that is still running. But the same arithmetic applied to a hold that
-has already run out re-occupies a room nobody is in: Early's 900 s hold
-expires a sighting at 07:42, and at 08:00 Working Day's 3600 s hold, measured
-against that same 07:27 sighting, has not "expired" yet by the naive
-arithmetic -- so a room that has been empty for eighteen minutes turns its
-lights back on. :attr:`confirmed_vacant_last_seen` is the fix: the first time
-:meth:`active` finds the hold run out for a given ``last_seen`` (on_devices
-empty), it remembers that ``last_seen`` value, and every later call -- at any
-hold_seconds -- reads as inactive for that same ``last_seen`` regardless.
-Only a fresh edge, which moves ``last_seen`` (see :meth:`update`), or a live
-sensor clears it.
+**A period boundary must not revive an expired hold (issue #15) -- and this
+module is not where that is fixed.** ``hold_seconds`` can change at a period
+boundary (a period may carry its own, overriding the zone's while it is
+active), and the hold judged is always the one for the period active *now*
+-- so a boundary can lengthen or shorten a hold that is still running. But
+the same arithmetic applied to a hold that has already run out re-occupies a
+room nobody is in: Early's 900 s hold expires a sighting at 07:42, and at
+08:00 Working Day's 3600 s hold, measured against that same 07:27 sighting,
+has not "expired" yet by the naive arithmetic -- so a room that has been
+empty for eighteen minutes turns its lights back on.
+
+``Presence`` has no opinion about periods -- it does not know they exist --
+so it cannot be the place that walks period boundaries to catch this. The
+fix lives one level up, in :meth:`lamplighter.zone.Zone.presence_expiry`: it
+walks every period boundary between ``last_seen`` and now with
+:func:`lamplighter.periods.next_boundary`, applying whichever hold was in
+force for each stretch, and the first stretch whose hold runs out *before
+its boundary arrives* is the real expiry -- permanently, because it is
+recomputed identically from ``last_seen`` every time, boundary or not,
+rather than remembered as a flag that a restart could lose. That is also why
+there is no ``would_be_active`` twin here any more: a stateless read has
+nothing to confirm and nothing to protect a dry run from.
 
 **The kinds of edge.** The fork re-planned on every update of a presence
 device, and an Occupatum countdown ticking "on, on, on" produced hundreds of
@@ -117,25 +123,9 @@ class Presence:
     the half that is persisted across a restart (R13).
     """
 
-    def __init__(
-        self,
-        last_seen=None,
-        on_devices=(),
-        last_value=None,
-        last_input_id=None,
-        confirmed_vacant_last_seen=None,
-    ):
+    def __init__(self, last_seen=None, on_devices=(), last_value=None, last_input_id=None):
         self.last_seen = last_seen
         self.on_devices = set(on_devices)
-        #: The ``last_seen`` value a real evaluation has already judged the
-        #: hold expired for (on_devices empty, and the hold run out) -- see
-        #: the module docstring's "A period boundary must not revive an
-        #: expired hold". ``None`` means nothing has been confirmed vacant
-        #: for the current ``last_seen`` yet. Set only by :meth:`active`,
-        #: the mutating read real evaluation calls; :meth:`would_be_active`
-        #: reads it without writing, exactly like :class:`~lamplighter.lux.Lux`'s
-        #: ``is_dark``/``would_be_dark`` split.
-        self.confirmed_vacant_last_seen = confirmed_vacant_last_seen
         #: The last reading ingested for each input, device or variable id ->
         #: bool. Not the same question as ``on_devices``: a device that
         #: reported off is *removed* from ``on_devices`` (it must not linger
@@ -192,43 +182,16 @@ class Presence:
         not. That is a usable configuration, which the old arithmetic's
         "never active" was not.
 
-        This is the **confirming** read: the moment it finds the hold run
-        out, it remembers ``last_seen`` in :attr:`confirmed_vacant_last_seen`
-        so a later period boundary that lengthens ``hold_seconds`` cannot
-        revive presence from that same sighting (issue #15, module
-        docstring). Called by a real evaluation only. A caller that must not
-        change what the zone will next decide -- a dry run, a status line --
-        calls :meth:`would_be_active` instead, exactly as :meth:`Zone.is_dark`
-        and :meth:`Zone.would_be_dark` split for the same reason.
+        Pure and stateless -- it reads nothing but its arguments and writes
+        nothing. A single fixed ``hold_seconds`` is exactly the question this
+        class can answer on its own; a caller that must also honour a hold
+        changing at a period boundary without reviving an expired sighting
+        (issue #15) is asking a question this class cannot see the shape of,
+        and wants :meth:`lamplighter.zone.Zone.presence_active` instead.
         """
-        active = self._active(now, hold_seconds)
-        if not active and not self.on_devices and self.last_seen is not None:
-            self.confirmed_vacant_last_seen = self.last_seen
-        return active
-
-    def would_be_active(self, now: dt.datetime, hold_seconds: int) -> bool:
-        """What :meth:`active` would answer, without confirming anything.
-
-        Reads :attr:`confirmed_vacant_last_seen` -- so it still honours an
-        expired hold a real evaluation already found -- but never sets it,
-        which is what lets a dry run ask "would this zone be occupied at
-        22:00" without deciding, for the zone, that it is not occupied now.
-        """
-        return self._active(now, hold_seconds)
-
-    def _active(self, now: dt.datetime, hold_seconds: int) -> bool:
-        """The read-only arithmetic shared by :meth:`active` and
-        :meth:`would_be_active`."""
         if self.on_devices:
             return True
         if self.last_seen is None:
-            return False
-        if self.confirmed_vacant_last_seen == self.last_seen:
-            # This exact sighting was already judged expired by a real
-            # evaluation. Only a fresh edge (a new last_seen) or a live
-            # sensor (the on_devices check above) can make the zone occupied
-            # again -- recomputing against a boundary-lengthened hold_seconds
-            # must not (issue #15).
             return False
         return now - self.last_seen < dt.timedelta(seconds=hold_seconds)
 

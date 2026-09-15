@@ -88,25 +88,10 @@ def an_occupied_zone():
 
 
 def a_held_zone():
-    """The same zone with an override held by device 201.
-
-    Also driven to VACANT and back to OCCUPIED once first, so
-    `presence_confirmed_vacant_last_seen` (issue #15) carries a real value
-    like every other field this module's round-trip test exercises --
-    otherwise that field would be the one persisted key that is always
-    empty for this scenario, which is a real state (see
-    test_a_zone_with_no_override_and_no_verdict_round_trips) but not the one
-    this test is for.
-    """
+    """The same zone with an override held by device 201."""
     zone = an_occupied_zone()
-    zone.ingest_presence(101, False, NOW)
-    vacant_at = NOW + dt.timedelta(seconds=zone.hold_seconds(NOW) + 1)
-    zone.evaluate(vacant_at, "hold expired")
-    re_occupied_at = vacant_at + dt.timedelta(seconds=10)
-    zone.ingest_presence(101, True, re_occupied_at)
-    zone.evaluate(re_occupied_at, "re-occupied")
-    zone.start_override(201, re_occupied_at)
-    zone.evaluate(re_occupied_at, "override started")
+    zone.start_override(201, NOW)
+    zone.evaluate(NOW, "override started")
     return zone
 
 
