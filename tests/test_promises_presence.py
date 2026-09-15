@@ -572,6 +572,421 @@ def test_dry_run_uses_the_period_hold():
     assert zone.state is ZoneState.OCCUPIED
 
 
+def _dining_room_boundary_scenario():
+    """The Dining Room reproduction from issue #15 (2026-09-15), driven up
+    to the moment the zone has genuinely gone VACANT under Early's hold.
+
+    07:26 presence, cleared 07:27:23, Early's 900 s hold runs out at
+    07:42:23 with nobody having come back. Working Day (08:00-, hold
+    3600 s) starts at 08:00. Returns ``(zone, boundary)``.
+    """
+    base = dt.datetime(2026, 9, 15, 7, 26, 0)
+    zone = make_zone(
+        [
+            make_period("Early", "07:00", "08:00", levels={"201": 60}, hold_seconds=900),
+            make_period(
+                "Working Day", "08:00", "22:00", levels={"201": 60}, hold_seconds=3600
+            ),
+        ],
+        logger=LOG,
+        lights=[201],
+        presence_devices=[101],
+        hold_seconds=1800,  # the zone's own value -- neither period's
+        lux=None,
+    )
+    zone.ingest_presence(101, True, base)
+    cleared = base + dt.timedelta(seconds=83)  # 07:27:23
+    zone.ingest_presence(101, False, cleared)
+    assert zone.evaluate(cleared, "presence edge").to_state is ZoneState.OCCUPIED
+
+    vacant_at = cleared + dt.timedelta(seconds=900)  # 07:42:23, Early's hold
+    move = zone.evaluate(vacant_at, "early hold expired")
+    assert move is not None and (move.from_state, move.to_state) == (
+        ZoneState.OCCUPIED,
+        ZoneState.VACANT,
+    ), "precondition: the zone must already be VACANT before the boundary"
+
+    return zone, dt.datetime(2026, 9, 15, 8, 0, 0)
+
+
+def test_a_boundary_never_revives_a_hold_that_has_already_expired():
+    """Issue #15: a zone already VACANT (Early's 900 s hold expired at
+    07:42:23 with nobody back) must not be re-judged OCCUPIED just because
+    the period boundary at 08:00 hands it Working Day's longer 3600 s hold
+    measured against the same stale 07:27:23 sighting. A boundary may still
+    lengthen or shorten a hold that is still RUNNING
+    (test_the_hold_of_the_period_active_now_is_the_one_judged) -- it must
+    never revive one that has already run out.
+
+    Mutation applied: Zone.presence_expiry's per-stretch check
+    `candidate <= boundary` -> replaced with `False`, so no stretch is ever
+    recognised as the one whose hold ran out, and the walk always falls
+    through to the next period's hold measured against the same stale
+    last_seen.
+    """
+    zone, boundary = _dining_room_boundary_scenario()
+
+    assert zone.evaluate(boundary, "period boundary") is None, (
+        "Working Day's longer hold revived the stale 07:27:23 sighting"
+    )
+    assert zone.state is ZoneState.VACANT
+
+
+def test_dry_run_agrees_the_boundary_does_not_revive_an_expired_hold():
+    """dry_run must not disagree with evaluate at the same boundary -- the
+    MCP `lamplighter_explain` tool asks dry_run on Simon's behalf, and a
+    caller told OCCUPIED while the real zone is VACANT is being lied to.
+
+    Mutation applied: Zone.dry_run's `presence_active = self.presence_active(at)`
+    -> `self.presence.active(at, self._hold_for(period))`, which asks the
+    plain per-period `Presence.active` directly and bypasses
+    `presence_expiry`'s boundary walk entirely -- exactly the old
+    would_be_active/active split's failure mode, reintroduced by routing
+    dry_run around the now-shared stateless rule instead of through it.
+    """
+    zone, boundary = _dining_room_boundary_scenario()
+
+    report = zone.dry_run(boundary)
+    assert report.state is ZoneState.VACANT
+
+    # Asking did not decide anything either: the live zone is unmoved, and a
+    # real evaluation right after still agrees.
+    assert zone.state is ZoneState.VACANT
+    assert zone.evaluate(boundary, "period boundary") is None
+    assert zone.state is ZoneState.VACANT
+
+
+def test_a_fresh_sighting_after_the_vacant_transition_still_occupies():
+    """The fix must not overcorrect: presence seen again after the zone went
+    VACANT is real presence, boundary or not.
+
+    Mutation applied: Presence.update's `self.last_seen = now` on the "on"
+    edge -> deleted. `presence_expiry` is recomputed fresh from `last_seen`
+    on every call, so a fresh sighting reoccupies only because it moves
+    `last_seen` forward past the point the walk found the old one expired;
+    losing that move is what would make the fix overcorrect and stick.
+    """
+    zone, boundary = _dining_room_boundary_scenario()
+    assert zone.evaluate(boundary, "period boundary") is None
+    assert zone.state is ZoneState.VACANT
+
+    new_sighting = dt.datetime(2026, 9, 15, 8, 11, 0)
+    zone.ingest_presence(101, True, new_sighting)
+    move = zone.evaluate(new_sighting, "presence edge")
+    assert move is not None and (move.from_state, move.to_state) == (
+        ZoneState.VACANT,
+        ZoneState.OCCUPIED,
+    )
+
+
+def test_a_confirmed_vacancy_does_not_schedule_a_pointless_hold_wake():
+    """next_wake must not offer a wake-up for a hold that has already run
+    out, just because Working Day's longer hold, recomputed against the
+    stale 07:27:23 sighting, lands in the future (08:27:23). That wake would
+    be harmless -- a real evaluation there would correctly stay VACANT --
+    but it is a wasted worker pass for a boundary that should cost nothing
+    once the zone is VACANT (issue #15).
+
+    Mutation applied: Zone.next_wake's `hold_expiry = self.presence_expiry()`
+    -> `self.presence.expiry(self.hold_seconds(now))`, the old naive
+    per-period-only expiry that ignores every boundary crossed since
+    `last_seen` and lands on exactly the stale 08:27:23 this test guards
+    against.
+    """
+    zone, boundary = _dining_room_boundary_scenario()
+    assert zone.evaluate(boundary, "period boundary") is None
+    assert zone.state is ZoneState.VACANT
+
+    stale_hold_expiry = dt.datetime(2026, 9, 15, 8, 27, 23)  # 07:27:23 + 3600s
+    wake = zone.next_wake(boundary)
+    assert wake != stale_hold_expiry, (
+        "a pointless wake was scheduled for the stale sighting's recomputed "
+        "-- and already confirmed expired -- hold"
+    )
+    # The only real things left to wake for: Working Day ending, or
+    # midnight for the counters.
+    assert wake == dt.datetime(2026, 9, 15, 22, 0)
+
+
+# --------------------------------------------- the stateless rework (issue #15)
+#
+# The confirmed-vacant latch above only worked if a real evaluation landed
+# between a hold expiring and the next period boundary -- and a boundary
+# does not wait for one. These pin the cases the latch could not cover, plus
+# the boundary walk's own promises: it must not suppress genuine presence
+# either.
+
+
+def _two_period_zone(first_hold, second_hold, **zone_fields):
+    """Early (07:00-08:00, ``first_hold``) then Working Day (08:00-22:00,
+    ``second_hold``), one light, one presence device -- the shape issue #15
+    was found in, parameterised on the two holds either side of 08:00.
+    """
+    zone_fields.setdefault("presence_devices", [101])
+    return make_zone(
+        [
+            make_period("Early", "07:00", "08:00", levels={"201": 60}, hold_seconds=first_hold),
+            make_period(
+                "Working Day", "08:00", "22:00", levels={"201": 60}, hold_seconds=second_hold
+            ),
+        ],
+        logger=LOG,
+        lights=[201],
+        hold_seconds=1800,  # neither period's -- so a fallback would show up
+        lux=None,
+        **zone_fields,
+    )
+
+
+def test_a_hold_that_runs_out_exactly_on_a_boundary_is_not_revived():
+    """Scenario (a): the edge case the old latch could not cover. A
+    07:45:00 sighting's 900 s Early hold and the 08:00 boundary into
+    Working Day's 3600 s hold coincide exactly, and there is no evaluation
+    in between for a latch to set -- the very first evaluation of this
+    sighting happens AT 08:00:00. It must already read VACANT.
+
+    Mutation applied: Zone.presence_expiry's per-stretch check
+    `candidate <= boundary` -> `candidate < boundary`, which misses a hold
+    that runs out exactly ON a boundary and lets the walk continue into
+    Working Day, measured against the same stale 07:45:00 sighting.
+    """
+    zone = _two_period_zone(first_hold=900, second_hold=3600)
+    base = dt.datetime(2026, 9, 15, 7, 45, 0)
+    zone.ingest_presence(101, True, base)
+    zone.ingest_presence(101, False, base)
+    assert zone.evaluate(base, "presence edge").to_state is ZoneState.OCCUPIED
+
+    boundary = dt.datetime(2026, 9, 15, 8, 0, 0)
+    move = zone.evaluate(boundary, "period boundary")
+    assert move is not None and move.to_state is ZoneState.VACANT, (
+        "the hold's own expiry and the period boundary coincide exactly, and "
+        "the first-ever evaluation of it must already read VACANT"
+    )
+
+
+def test_a_hold_that_ran_out_on_a_boundary_stays_expired_on_a_late_wake():
+    """Scenario (b): the same sighting as the previous test, asked five
+    seconds late instead of exactly on the boundary -- a late worker wake,
+    not an exact timer fire. `presence_expiry` does not depend on when it is
+    asked, only on `last_seen` and the periods table, so this must answer
+    exactly as VACANT as asking at the boundary itself.
+
+    Mutation applied: Zone.presence_active reverting to the pre-fix naive
+    rule `at - last_seen < self.hold_seconds(at)` in place of the
+    `presence_expiry` walk -- issue #15's original bug, and precisely as
+    wrong five seconds after the boundary as it is at the boundary itself
+    (Working Day's 3600 s hold has not naively "expired" against a
+    07:45:00 sighting by 08:00:05 either).
+    """
+    zone = _two_period_zone(first_hold=900, second_hold=3600)
+    base = dt.datetime(2026, 9, 15, 7, 45, 0)
+    zone.ingest_presence(101, True, base)
+    zone.ingest_presence(101, False, base)
+    assert zone.evaluate(base, "presence edge").to_state is ZoneState.OCCUPIED
+
+    late_wake = dt.datetime(2026, 9, 15, 8, 0, 5)
+    move = zone.evaluate(late_wake, "presence hold expired")
+    assert move is not None and move.to_state is ZoneState.VACANT
+
+
+def test_a_live_sensor_still_on_stays_occupied_across_a_boundary():
+    """The fix must not suppress genuine presence: a sensor still reporting
+    ON is occupied outright, whatever the hold arithmetic says (section
+    5.4's first clause), and that holds across a period boundary exactly as
+    it does within one period.
+
+    Mutation applied: Zone.presence_active's `if self.presence.on_devices:
+    return True` -> deleted, falling through to `presence_expiry`, which
+    would find the original "on" edge's `last_seen` aged past Early's hold
+    and wrongly report VACANT with the radar still reporting.
+    """
+    zone = _two_period_zone(first_hold=900, second_hold=3600)
+    base = dt.datetime(2026, 9, 15, 7, 45, 0)
+    zone.ingest_presence(101, True, base)  # the radar sees somebody. That is all.
+    assert zone.evaluate(base, "presence edge").to_state is ZoneState.OCCUPIED
+
+    boundary = dt.datetime(2026, 9, 15, 8, 0, 0)
+    assert zone.evaluate(boundary, "period boundary") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+    well_past = dt.datetime(2026, 9, 15, 9, 0, 0)
+    assert zone.evaluate(well_past, "reconcile tick") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+
+def test_a_live_presence_variable_stays_occupied_across_a_boundary():
+    """The same promise for a presence VARIABLE. `on_devices` holds device
+    and variable ids in one set (module docstring), so this exercises the
+    same code path as the previous test, but the house's phone-presence
+    variable (`SimonHome`) is worth pinning on its own rather than trusting
+    that "a device" generalises.
+
+    Mutation applied: Zone.ingest_presence's `if device_id not in
+    self.config.presence_devices and device_id not in
+    self.config.presence_variables: return False` -> drop the
+    `presence_variables` half, so the variable's "on" reading is never
+    ingested at all and the zone reads whatever `last_seen` predates it.
+    """
+    zone = _two_period_zone(
+        first_hold=900, second_hold=3600, presence_devices=[999], presence_variables=[9001]
+    )
+    base = dt.datetime(2026, 9, 15, 7, 45, 0)
+    assert zone.ingest_presence(9001, True, base) is True
+    assert zone.evaluate(base, "presence edge").to_state is ZoneState.OCCUPIED
+
+    boundary = dt.datetime(2026, 9, 15, 8, 0, 0)
+    assert zone.evaluate(boundary, "period boundary") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+
+def test_a_restart_with_the_sensor_still_on_stays_occupied_across_a_boundary():
+    """The restart case combined with a boundary: a radar seeded ON at
+    startup (`Engine._seed_zone`, no persisted timestamp needed since
+    `on_devices` is rebuilt from the device itself) must hold the room
+    OCCUPIED through a period boundary exactly as a live sensor does when
+    the plugin never stopped -- seeding must not quietly degrade into the
+    persisted-`last_seen` path.
+
+    Mutation applied: Engine._seed_zone's `if presence_is_on(device):
+    zone.ingest_presence(device_id, True, now)` -> deleted, so the restarted
+    zone starts with no `on_devices` and no persisted record either, and
+    reads the room as never seen.
+    """
+    make_device(101, "relay", name="Early Radar", onState=True)
+    make_device(201, "dimmer", name="Early Lamp")
+    config = make_config(
+        [
+            {
+                "name": "Early Room",
+                "presence_devices": [101],
+                "hold_seconds": 1800,
+                "lux": None,
+                "lights": [201],
+                "periods": [
+                    make_period("Early", "07:00", "08:00", levels={"201": 60}, hold_seconds=900),
+                    make_period(
+                        "Working Day", "08:00", "22:00", levels={"201": 60}, hold_seconds=3600
+                    ),
+                ],
+            }
+        ]
+    )
+    base = dt.datetime(2026, 9, 15, 7, 45, 0)
+    engine = Engine(config, FixedSun(), RecordingCommander(), logger=LOG)
+    zone = engine.zones["Early Room"]
+
+    engine.seed_inputs(base)
+    assert zone.presence.on_devices == {101}, "the radar was on; the zone must know"
+
+    engine.mark_all_dirty("startup")
+    engine.tick(base)
+    assert zone.state is ZoneState.OCCUPIED
+
+    boundary = dt.datetime(2026, 9, 15, 8, 0, 0)
+    assert engine.tick(boundary) is not None
+    assert zone.state is ZoneState.OCCUPIED, "a seeded level sensor holds the room across a boundary"
+
+
+def test_a_shorter_hold_boundary_stays_occupied_while_still_within_it():
+    """A boundary into a SHORTER hold is honoured immediately -- R4: it can
+    shorten a hold that is still running -- but only once genuinely inside
+    it. A sighting two minutes before the boundary is still within Working
+    Day's shorter 900 s hold at the boundary itself, and for most of the
+    time left in it.
+
+    Mutation applied: Zone.presence_expiry's `return candidate` inside the
+    walk -> `return boundary`, which would treat every period boundary as
+    an automatic expiry regardless of whether the hold actually in force
+    has run out, wrongly ending this sighting's hold at 08:00:00 with most
+    of Working Day's 900 s hold still to run.
+    """
+    zone = _two_period_zone(first_hold=3600, second_hold=900)
+    base = dt.datetime(2026, 9, 15, 7, 58, 0)  # two minutes before the boundary
+    zone.ingest_presence(101, True, base)
+    zone.ingest_presence(101, False, base)
+    assert zone.evaluate(base, "presence edge").to_state is ZoneState.OCCUPIED
+
+    boundary = dt.datetime(2026, 9, 15, 8, 0, 0)
+    assert zone.evaluate(boundary, "period boundary") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+    # One second inside Working Day's 900 s hold, measured from the sighting.
+    still_in = base + dt.timedelta(seconds=899)
+    assert zone.evaluate(still_in, "reconcile tick") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+
+def test_a_shorter_hold_that_ran_out_before_its_boundary_stays_vacant():
+    """The paired case: a sighting further before the boundary, old enough
+    that Early's SHORT hold has already run out by 08:00 -- Working Day's
+    much longer hold, starting right there, is never even consulted against
+    it (issue #15). Twin of the previous test, at a sighting too old to
+    survive the shortening instead of one that survives it.
+
+    Mutation applied: Zone.presence_expiry's `candidate <= boundary` ->
+    `False`, so the run-out at 08:00:00 (900 s after the 07:45:00 sighting)
+    is never recognised and the walk falls through to Working Day's much
+    longer hold measured against the same stale sighting.
+    """
+    zone = _two_period_zone(first_hold=900, second_hold=3600)
+    base = dt.datetime(2026, 9, 15, 7, 45, 0)  # Early's hold runs out at 08:00 exactly
+    zone.ingest_presence(101, True, base)
+    zone.ingest_presence(101, False, base)
+    assert zone.evaluate(base, "presence edge").to_state is ZoneState.OCCUPIED
+
+    boundary = dt.datetime(2026, 9, 15, 8, 0, 0)
+    move = zone.evaluate(boundary, "period boundary")
+    assert move is not None and move.to_state is ZoneState.VACANT
+
+
+def test_sun_relative_boundary_walk_is_deterministic_for_past_dates():
+    """The walk must work identically for a `last_seen` a day in the past --
+    the shape a restart after a day or two down produces -- and must ask
+    the sun freshly for each date it actually crosses rather than reusing
+    "today"'s answer. Sunset alternates by date (FixedSun's callable form)
+    so a stale or cached answer would show up as a wrong or
+    non-deterministic result rather than agreeing by chance; `sun.asked` is
+    reset after building the zone (loading it samples the year's solstices
+    and equinoxes for the overlap check, R11 -- not what this test is
+    about) so the dates counted below are only the ones the walk itself
+    asked for.
+
+    Mutation applied: Zone.presence_expiry's `t = boundary` (advancing to
+    the next stretch) -> `t = last_seen` (repeating the first stretch
+    forever), which would ask the sun for the same date on every iteration
+    and never reach the next day's sunset this sighting's hold has to cross
+    before it runs out.
+    """
+    hold = 86400  # the schema's maximum, so the hold spans a full day
+
+    def sunset_for(date):
+        return dt.time(19, 0) if date.day % 2 == 0 else dt.time(20, 30)
+
+    sun = FixedSun(sunset=sunset_for)
+    zone = make_zone(
+        [make_period("Evening", "sunset", "23:00", levels={"201": 60}, hold_seconds=hold)],
+        sun=sun,
+        logger=LOG,
+        lights=[201],
+        presence_devices=[101],
+        hold_seconds=hold,
+        lux=None,
+    )
+    sun.asked.clear()
+
+    last_seen = dt.datetime(2026, 9, 10, 21, 0, 0)
+    zone.ingest_presence(101, True, last_seen)
+    zone.ingest_presence(101, False, last_seen)
+
+    first = zone.presence_expiry()
+    second = zone.presence_expiry()
+    assert first == second, "the boundary walk must be deterministic, not order-dependent"
+    assert first == last_seen + dt.timedelta(seconds=hold)
+
+    dates_asked = {date for _kind, date in sun.asked}
+    assert len(dates_asked) >= 3, "the walk never actually crossed into the next day's sun"
+
+
 def test_a_period_hold_longer_than_the_zone_hold_keeps_the_room_occupied_past_the_zone_hold():
     """A period hold LONGER than the zone's is honoured in full -- the PRD's
     motivating case is a long seated-working-day hold on a period over a

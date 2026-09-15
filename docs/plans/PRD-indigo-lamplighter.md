@@ -70,7 +70,7 @@ fix, with the evidence. These are the acceptance criteria, not background.
 | R1 | Manual override is judged from the device-change **transition** (before-state at desired, after-state off desired), per device, never from a live re-read. | Fork #15: revert landed first, live read saw nothing. 2026-09-03 19:46:35, transition rule locked 112 ms after the command. |
 | R2 | Our own writes never create an override: we only command devices that are off desired, so every echo starts off desired. | Fork attempt 1 (194e6af) locked on every ramp step. |
 | R3 | An echo of our command that arrives after the desired level moved back onto the device's pre-command state is still ours: remember the state each device was commanded away from, 30 s, consumed once. | Review of #16: in-room lux rises → not dark → lights off → delayed on-echo read as override. Raised from 15 s to 30 s (review of #5, `fix/recheck-30s`): the window must cover the longest time a command can sit un-transmitted, which is what the reconciler's `COMMAND_RECHECK_SECONDS` is sized to, after a 28 s Z-Wave transmit delay was observed. |
-| R4 | A zone re-plans only when an **input** changes: presence on/off, presence last-seen crossing the hold, lux crossing the (hysteresis-widened) threshold, a period boundary, an override starting or ending. Not on any device update. Presence itself may come from an Indigo variable as well as a device (`presence_variables`), on the same any-of, edge-gated terms. A period may carry its own `hold_seconds`, overriding the zone's while it is active; the hold judged is always the one for the period active at that moment, so a period boundary can itself lengthen or shorten a hold already running. | Occupatum ticked every 1.2 s → hundreds of re-plans an hour → reverts within a second, 10 s callback lag. |
+| R4 | A zone re-plans only when an **input** changes: presence on/off, presence last-seen crossing the hold, lux crossing the (hysteresis-widened) threshold, a period boundary, an override starting or ending. Not on any device update. Presence itself may come from an Indigo variable as well as a device (`presence_variables`), on the same any-of, edge-gated terms. A period may carry its own `hold_seconds`, overriding the zone's while it is active; the hold judged is always the one for the period active at that moment, so a period boundary can lengthen or shorten a hold that is still running -- but it never revives one that has already run out, whatever the next period's hold is, computed statelessly by walking every boundary crossed since the last sighting rather than by remembering a prior verdict (issue #15). | Occupatum ticked every 1.2 s → hundreds of re-plans an hour → reverts within a second, 10 s callback lag. |
 | R5 | Brightness comparisons use a proportional band: `max(1, ceil(10 % of target))`, with 0 and 100 exact. | zigbee2mqtt truncates both ways (30 → 29); a group dimmer reads back 45..48 for 50. |
 | R6 | A late reporter (a device whose state arrives seconds or more after the command) is neither retried nor suppressed nor treated as an override; it is reconciled when it finally reports. | Under the fork's 2 s confirm-and-suppress machinery, any light that had not reported by the re-check could read as a manual override; the workaround was `exclude_from_lock_dev_ids`. |
 | R7 | A dimmer that flashes to its previous level before settling must not lock. | Tuya TS0502B turn-on behaviour; covered by R1 (previous state off desired). |
@@ -175,14 +175,17 @@ that fed the decision (R14).
   PIR re-reports on movement and hides the bug; a radar does not.
 - While any sensor is on there is **no hold running**, so no hold wake-up is
   scheduled. The wake is scheduled when the last sensor clears.
-- Two pieces of state, and only one is persisted:
+- Two pieces of state, and one is persisted:
   - the set of devices currently reporting — rebuilt at startup by reading the
     devices themselves, because who is on *now* is a fact about the room, not
     about what the plugin believed when it stopped. A radar that has been on
     since before a restart is picked up by seeding and holds the zone.
   - `last_seen` — stamped on an "on" reading *and on an "off"* (the clear is
     when the delay starts), and persisted (R13) so a restart does not turn the
-    lights off on an occupied room.
+    lights off on an occupied room. `last_seen` alone is also enough for the
+    boundary-safety rule below: nothing else needs to survive a restart,
+    because the rule is recomputed from scratch every time it is asked
+    rather than remembered.
 - An "off" reading is therefore an input edge: it is the only notice the
   worker gets that a hold has begun and a wake-up is now due. It is not a
   state edge — the room stays occupied for `hold_seconds` more.
@@ -190,7 +193,24 @@ that fed the decision (R14).
   as it is active; absent, the zone's applies. The Dining Room needs this: a
   3600 s hold for the seated working day so a person going quiet does not
   lose the light, and a much shorter one outside it so an 8 s morning PIR
-  trip does not light the room for an hour.
+  trip does not light the room for an hour. **This can only lengthen or
+  shorten a hold that is still running (R4). Once a sighting's hold has run
+  out, it is never revived by a later period handing it a longer hold against
+  that same sighting** (issue #15, 2026-09-15: the Dining Room's 900 s Early
+  hold expired at 07:42 with nobody back, and the 08:00 boundary into Working
+  Day's 3600 s hold turned the lights on for an empty room). The rule is
+  **stateless**: whether presence is active is decided by walking every
+  period boundary between `last_seen` and now, applying whichever
+  `hold_seconds` was in force for each stretch, and stopping at the first
+  stretch whose hold ran out before its own boundary arrived -- that is the
+  real expiry, final, and it is recomputed identically on every ask rather
+  than latched onto a remembered flag a restart could lose (an earlier
+  version of this fix tried exactly that: a `confirmed_vacant_last_seen`
+  flag set the first time a real evaluation found the hold expired -- it
+  only worked if an evaluation happened to land between the expiry and the
+  next boundary, which a boundary does not wait around for). Only a fresh
+  sighting that moves `last_seen` forward, or live presence, occupies the
+  zone again.
 
 ### 5.5 Periods
 

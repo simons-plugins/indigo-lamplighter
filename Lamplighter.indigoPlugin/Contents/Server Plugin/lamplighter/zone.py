@@ -327,10 +327,65 @@ class Zone:
         """The presence hold in force at ``now``: the active period's if it
         sets one, else the zone's (PRD section 5.4). The hold judged is
         always the one for the period active AT ``now``, not the one active
-        when presence was last seen, so it can lengthen or shorten at a
-        period boundary.
+        when presence was last seen, so it can lengthen or shorten a hold
+        that is still running at a period boundary. See
+        :meth:`presence_expiry` for what stops that same arithmetic reviving
+        a hold that has already run out (issue #15).
         """
         return self._hold_for(self.active_period(now))
+
+    def presence_expiry(self):
+        """When the current sighting actually stops being active, or None.
+
+        None has the same two meanings :meth:`~lamplighter.presence.Presence.expiry`
+        gives it: nothing has ever been seen, or a sensor is on right now, so
+        there is no hold running to expire.
+
+        Otherwise this walks every period boundary between ``last_seen`` and
+        now with :func:`~lamplighter.periods.next_boundary`, applying
+        whichever ``hold_seconds`` was in force for each stretch -- a period
+        may carry its own, overriding the zone's while it is active -- and
+        stops at the first stretch whose hold runs out before its boundary
+        arrives. That is the real expiry, and it is final: a later period's
+        longer hold, measured against the same stale ``last_seen``, is never
+        consulted once an earlier, shorter one has already run out (issue
+        #15). A hold still running when its boundary arrives instead
+        lengthens or shortens under the next period exactly as before -- the
+        walk simply carries on into that stretch.
+
+        Stateless: nothing is remembered between calls, so a dry run and a
+        real evaluation asking this at the same moment always agree, and a
+        restart needs nothing but ``last_seen`` (R13) to get the same answer
+        back -- there is no confirmation to lose. :meth:`presence_active` and
+        :meth:`~lamplighter.engine.Engine._wake_cause` both read this rather
+        than keeping their own copy of the walk.
+        """
+        if self.presence.on_devices:
+            return None
+        last_seen = self.presence.last_seen
+        if last_seen is None:
+            return None
+        t = last_seen
+        while True:
+            candidate = self.presence.expiry(self._hold_for(self.active_period(t)))
+            boundary = periods_module.next_boundary(self.config.periods, t, self.sun)
+            if boundary is None or candidate <= boundary:
+                return candidate
+            t = boundary
+
+    def presence_active(self, at: dt.datetime) -> bool:
+        """Is the zone occupied at ``at``? Any sensor on, or the hold has not
+        expired at :meth:`presence_expiry` (PRD section 5.4, issue #15).
+
+        Pure: reads the inputs as they stand, decides nothing and remembers
+        nothing, so :meth:`evaluate` and :meth:`dry_run` can both call this
+        directly -- there is no confirming/read-only split left to keep in
+        step, because there is nothing left for a confirming read to confirm.
+        """
+        if self.presence.on_devices:
+            return True
+        expiry = self.presence_expiry()
+        return expiry is not None and at < expiry
 
     def dark_below(self) -> float:
         """The dark threshold: the Indigo variable if there is one, else the file.
@@ -501,7 +556,7 @@ class Zone:
         if override is None:
             return
 
-        if self._released_by_leaving(now, presence_active):
+        if self._released_by_leaving(presence_active):
             self.end_override("the room emptied and unlock_on_leave is set", now)
             return
 
@@ -521,7 +576,7 @@ class Zone:
 
         self.end_override("it expired with the room empty", now)
 
-    def _released_by_leaving(self, now, presence_active) -> bool:
+    def _released_by_leaving(self, presence_active) -> bool:
         """Should unlock-on-leave release this override right now (R10)?
 
         Two conditions, and the second is the one the fork got wrong in both
@@ -541,7 +596,7 @@ class Zone:
         """
         if not self.config.override.unlock_on_leave or presence_active:
             return False
-        expiry = self.presence.expiry(self.hold_seconds(now))
+        expiry = self.presence_expiry()
         return expiry is not None and expiry > self.override.since
 
     def override_holds_at(self, at: dt.datetime, presence_active: bool) -> bool:
@@ -556,7 +611,7 @@ class Zone:
         override = self.override
         if override is None:
             return False
-        if self._released_by_leaving(at, presence_active):
+        if self._released_by_leaving(presence_active):
             return False
         if at < override.expires_at:
             return True
@@ -577,7 +632,7 @@ class Zone:
         self.last_trigger = cause
 
         period = self.active_period(now)
-        presence_active = self.presence.active(now, self._hold_for(period))
+        presence_active = self.presence_active(now)
         dark = self.is_dark()
 
         # The override's own clock runs before the state is chosen, so that an
@@ -813,7 +868,14 @@ class Zone:
         # point: there is no hold to expire until the room clears. Scheduling
         # one anyway is how a zone on a level sensor wakes up in the middle
         # of somebody sitting still and puts itself VACANT.
-        hold_expiry = self.presence.expiry(self.hold_seconds(now))
+        #
+        # `presence_expiry` already walks every period boundary between the
+        # sighting and now, so a hold a shorter period already ran out under
+        # comes back as a moment in the past rather than a boundary-lengthened
+        # moment still ahead of us (issue #15) -- the `when > now` filter
+        # below drops it, and no separate "already confirmed vacant" case is
+        # needed to avoid a pointless wake for it.
+        hold_expiry = self.presence_expiry()
         if hold_expiry is not None:
             candidates.append(hold_expiry)
         if self.override is not None:
@@ -902,9 +964,12 @@ class Zone:
         it stands **now**, because that is the only honest answer available:
         nobody knows whether the room will be occupied at midnight.
 
-        Nothing here writes, evaluates, reconciles or moves a counter. Three
-        of the pieces it needs are hazardous asked the ordinary way and each
-        has a read-only twin: :meth:`would_be_dark` rather than
+        Nothing here writes, evaluates, reconciles or moves a counter.
+        :meth:`presence_active` is one of the pieces it needs and is safe to
+        call directly -- it is stateless (issue #15; see its docstring and
+        :meth:`presence_expiry`), so there is no confirming read left for a
+        dry run to avoid. The other three are hazardous asked the ordinary
+        way and each has a read-only twin: :meth:`would_be_dark` rather than
         :meth:`is_dark`, which would advance the hysteresis band;
         :meth:`override_holds_at` rather than ``_age_override``, which would
         release a live lock; and :meth:`_plan_for` rather than
@@ -913,7 +978,7 @@ class Zone:
         answer -- the one failure a dry run must not have.
         """
         period = self.active_period(at)
-        presence_active = self.presence.active(at, self._hold_for(period))
+        presence_active = self.presence_active(at)
         dark = self.would_be_dark()
         overridden = self.override_holds_at(at, presence_active)
         off_duty = self._off_duty_reason(period, dark)

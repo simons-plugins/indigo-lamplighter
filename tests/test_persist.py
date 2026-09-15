@@ -317,4 +317,59 @@ def test_rebuild_drops_per_input_bookkeeping_for_a_removed_presence_variable():
     narrowed = a_zone(presence_variables=[]).config
     after = persist.rebuild_zone(before, narrowed, at(minutes=1))
     assert after.presence.last_value == {}
+
+
+# ----------------------------------------- issue #15: a restart must not
+# ----------------------------------------- reopen the boundary revival bug
+
+
+def test_a_restart_between_a_running_hold_and_its_boundary_does_not_revive_it():
+    """persist.py's half of issue #15 -- and the case the old
+    confirmed-vacant latch could not cover, because no evaluation ever ran
+    while the hold was expired to set it (see the module docstring's PR
+    history and lamplighter.presence's docstring): the record is persisted
+    at 07:50, five minutes into Early's 900 s hold from a 07:45:00 sighting,
+    while the room is still genuinely OCCUPIED. The plugin restarts at
+    08:05, five minutes past the 08:00 boundary into Working Day's much
+    longer 3600 s hold. With nothing surviving but `presence_last_seen`,
+    the restored zone must still work out that Early's hold ran out exactly
+    at the 08:00 boundary -- before Working Day's longer hold is ever
+    measured against that same stale 07:45:00 sighting -- and come up
+    VACANT.
+
+    Mutation applied: Zone.presence_expiry's `candidate <= boundary` ->
+    `candidate < boundary`, which misses a hold that runs out exactly ON a
+    boundary and falls through to the next period's longer hold instead.
+    """
+    periods = [
+        make_period("Early", "07:00", "08:00", levels={"201": 60}, hold_seconds=900),
+        make_period(
+            "Working Day", "08:00", "22:00", levels={"201": 60}, hold_seconds=3600
+        ),
+    ]
+    base = dt.datetime(2026, 9, 15, 7, 45, 0)
+
+    before = a_zone(periods, lights=[201], presence_devices=[101], lux=None)
+    before.ingest_presence(101, True, base)
+    before.ingest_presence(101, False, base)
+    assert before.evaluate(base, "presence edge").to_state is ZoneState.OCCUPIED
+
+    # Persisted five minutes later, still well inside the 900 s hold: no
+    # evaluation has ever found this sighting VACANT to latch anything onto.
+    persisted_at = base + dt.timedelta(minutes=5)  # 07:50:00
+    assert before.evaluate(persisted_at, "reconcile tick") is None
+    assert before.state is ZoneState.OCCUPIED
+    record = persist.to_persisted(before)
+    assert record["presence_last_seen"] == "2026-09-15T07:45:00"
+
+    # The restart, five minutes past the boundary.
+    restart_at = dt.datetime(2026, 9, 15, 8, 5, 0)
+    after = a_zone(periods, lights=[201], presence_devices=[101], lux=None)
+    assert persist.apply_persisted(after, record, restart_at) == []
+
+    move = after.evaluate(restart_at, "startup")
+    assert move is not None and move.to_state is ZoneState.VACANT, (
+        "Working Day's longer hold, measured against the restored stale "
+        "07:45:00 sighting, revived it as OCCUPIED"
+    )
     assert after.presence.last_input_id is None

@@ -25,10 +25,33 @@ So the state lives in two places and both matter:
   "on" reading *and on an "off" one*, because the hold is a delay after the
   room clears, not a delay after the last sighting.
 
-Only ``last_seen`` is persisted (R13). The reporting set is rebuilt at
-startup by :meth:`lamplighter.engine.Engine._seed_zone` reading the devices
-themselves, because who is on *now* is a fact about the room and not about
-what the plugin believed when it stopped.
+``last_seen`` is persisted (R13). The reporting set is rebuilt at startup by
+:meth:`lamplighter.engine.Engine._seed_zone` reading the devices themselves,
+because who is on *now* is a fact about the room and not about what the
+plugin believed when it stopped.
+
+**A period boundary must not revive an expired hold (issue #15) -- and this
+module is not where that is fixed.** ``hold_seconds`` can change at a period
+boundary (a period may carry its own, overriding the zone's while it is
+active), and the hold judged is always the one for the period active *now*
+-- so a boundary can lengthen or shorten a hold that is still running. But
+the same arithmetic applied to a hold that has already run out re-occupies a
+room nobody is in: Early's 900 s hold expires a sighting at 07:42, and at
+08:00 Working Day's 3600 s hold, measured against that same 07:27 sighting,
+has not "expired" yet by the naive arithmetic -- so a room that has been
+empty for eighteen minutes turns its lights back on.
+
+``Presence`` has no opinion about periods -- it does not know they exist --
+so it cannot be the place that walks period boundaries to catch this. The
+fix lives one level up, in :meth:`lamplighter.zone.Zone.presence_expiry`: it
+walks every period boundary between ``last_seen`` and now with
+:func:`lamplighter.periods.next_boundary`, applying whichever hold was in
+force for each stretch, and the first stretch whose hold runs out *before
+its boundary arrives* is the real expiry -- permanently, because it is
+recomputed identically from ``last_seen`` every time, boundary or not,
+rather than remembered as a flag that a restart could lose. That is also why
+there is no ``would_be_active`` twin here any more: a stateless read has
+nothing to confirm and nothing to protect a dry run from.
 
 **The kinds of edge.** The fork re-planned on every update of a presence
 device, and an Occupatum countdown ticking "on, on, on" produced hundreds of
@@ -158,6 +181,13 @@ class Presence:
         whatever the hold is, and the instant the last one goes off it is
         not. That is a usable configuration, which the old arithmetic's
         "never active" was not.
+
+        Pure and stateless -- it reads nothing but its arguments and writes
+        nothing. A single fixed ``hold_seconds`` is exactly the question this
+        class can answer on its own; a caller that must also honour a hold
+        changing at a period boundary without reviving an expired sighting
+        (issue #15) is asking a question this class cannot see the shape of,
+        and wants :meth:`lamplighter.zone.Zone.presence_active` instead.
         """
         if self.on_devices:
             return True
