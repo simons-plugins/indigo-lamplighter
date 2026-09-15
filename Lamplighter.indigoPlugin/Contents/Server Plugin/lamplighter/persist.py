@@ -2,20 +2,31 @@
 
 The fork announced "all locks and zone state has been reset" on every single
 reload, which meant an override created at 19:46 was gone by 19:50 because
-somebody edited an unrelated zone. Three things survive here instead:
-``presence_last_seen``, the override, and the dark verdict.
+somebody edited an unrelated zone. Four things survive here instead:
+``presence_last_seen``, ``presence_confirmed_vacant_last_seen``, the
+override, and the dark verdict.
 
 Each is persisted for a reason that is not obvious until it is missing:
 
 * **presence_last_seen** -- without it a restart in an occupied room starts
   from "nobody has ever been here" and turns the lights off on the person
-  standing in it. It is the only half of presence that is persisted: which
-  sensors are reporting *now* is deliberately NOT written down, because it is
-  a fact about the room rather than about the plugin, and a stale set read
-  off a device would hold a zone occupied on a sensor that had gone off while
-  the plugin was stopped. ``Engine._seed_zone`` rebuilds it from the devices
-  at startup instead. (A config *reload* is different: the plugin never
-  stopped, so ``rebuild_zone`` carries the live set across.)
+  standing in it. Which sensors are reporting *now* is deliberately NOT
+  written down, because it is a fact about the room rather than about the
+  plugin, and a stale set read off a device would hold a zone occupied on a
+  sensor that had gone off while the plugin was stopped. ``Engine._seed_zone``
+  rebuilds it from the devices at startup instead. (A config *reload* is
+  different: the plugin never stopped, so ``rebuild_zone`` carries the live
+  set across.)
+* **presence_confirmed_vacant_last_seen** -- the other half of the issue #15
+  fix (:mod:`lamplighter.presence`'s module docstring). Without this, a
+  restart between a zone going VACANT and its next period boundary loses the
+  fact that this sighting's hold was already judged expired, and the
+  boundary's longer hold can revive it exactly as the un-patched bug did --
+  a restart must not be a second way in to the same defect. Restored
+  alongside ``presence_last_seen`` and read by the same tolerant-per-field
+  rule below; a record from before this field existed simply lacks it, which
+  reads as "nothing confirmed yet" -- the same starting point a fresh zone
+  has, never a wrong one.
 * **the override** -- the point of R13. It carries its own
   ``duration_minutes`` and ``extend_minutes`` because the period that created
   it may not be the period it expires in (section 11, decision 4).
@@ -55,6 +66,7 @@ def to_persisted(zone: Zone) -> dict:
     return {
         "version": VERSION,
         "presence_last_seen": _iso(zone.presence.last_seen),
+        "presence_confirmed_vacant_last_seen": _iso(zone.presence.confirmed_vacant_last_seen),
         "dark": zone.lux.verdict,
         "override_device": override.device_id if override else "",
         "override_since": _iso(override.since) if override else "",
@@ -114,6 +126,15 @@ def apply_persisted(zone: Zone, data, now: dt.datetime, logger=None) -> list:
             )
             last_seen = now
         zone.presence.last_seen = last_seen
+
+    # Not clamped like `last_seen` above: this value is never used
+    # arithmetically, only compared for exact equality against `last_seen`
+    # (see Presence._active), so a stale or future value simply fails to
+    # match and has no effect -- there is no "wrong" value to guard against,
+    # only a confirmation that either still applies or quietly does not.
+    confirmed_vacant = _read_time(data, "presence_confirmed_vacant_last_seen", complain)
+    if confirmed_vacant is not None:
+        zone.presence.confirmed_vacant_last_seen = confirmed_vacant
 
     dark = data.get("dark")
     if dark is not None:

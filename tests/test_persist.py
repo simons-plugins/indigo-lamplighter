@@ -74,6 +74,31 @@ def test_a_clean_record_round_trips_whole():
     assert after.override.extended_count == before.override.extended_count
 
 
+def test_confirmed_vacant_last_seen_round_trips():
+    """The other half of the issue #15 fix: the confirmation that a hold has
+    already run out survives a restart exactly like presence_last_seen does
+    -- see the module docstring and test_a_restart_does_not_reopen_the_
+    boundary_revival_bug below for why losing it matters.
+
+    Mutation applied: to_persisted/apply_persisted omitting
+    `presence_confirmed_vacant_last_seen`.
+    """
+    before = a_zone()
+    before.ingest_presence(101, True, NOW)
+    before.ingest_presence(101, False, NOW)
+    before.evaluate(NOW, "presence edge")
+    move = before.evaluate(at(minutes=10), "hold expired")  # 600s > the 300s hold
+    assert move is not None and move.to_state is ZoneState.VACANT
+    assert before.presence.confirmed_vacant_last_seen == NOW
+
+    record = persist.to_persisted(before)
+    assert record["presence_confirmed_vacant_last_seen"] == "2026-09-04T20:00:00"
+
+    after = a_zone()
+    assert persist.apply_persisted(after, record, at(minutes=11)) == []
+    assert after.presence.confirmed_vacant_last_seen == NOW
+
+
 def test_the_record_is_strings_numbers_and_booleans_only():
     """Indigo device states hold nothing else (section 9)."""
     record = persist.to_persisted(a_held_zone())
@@ -317,4 +342,60 @@ def test_rebuild_drops_per_input_bookkeeping_for_a_removed_presence_variable():
     narrowed = a_zone(presence_variables=[]).config
     after = persist.rebuild_zone(before, narrowed, at(minutes=1))
     assert after.presence.last_value == {}
+
+
+# ----------------------------------------- issue #15: a restart must not
+# ----------------------------------------- reopen the boundary revival bug
+
+
+def test_a_restart_does_not_reopen_the_boundary_revival_bug():
+    """persist.py's half of issue #15. A zone goes VACANT under a short
+    period hold (Early, 900 s); the plugin restarts a few seconds later,
+    well before the next period boundary; the boundary then hands the
+    restarted zone a much longer hold (Working Day, 3600 s) measured
+    against the very same stale sighting. If the restart lost the fact that
+    this sighting's hold had already been judged expired, the boundary
+    revives it and the room's lights come back on for nobody -- exactly the
+    live-zone bug test_a_boundary_never_revives_a_hold_that_has_already_
+    expired (tests/test_promises_presence.py) closes, reopened by a
+    restart instead of by staying in memory.
+
+    Mutation applied: to_persisted/apply_persisted dropping
+    `presence_confirmed_vacant_last_seen` (persisting only
+    `presence_last_seen`, as before this fix).
+    """
+    periods = [
+        make_period("Early", "07:00", "08:00", levels={"201": 60}, hold_seconds=900),
+        make_period(
+            "Working Day", "08:00", "22:00", levels={"201": 60}, hold_seconds=3600
+        ),
+    ]
+    base = dt.datetime(2026, 9, 15, 7, 26, 0)
+
+    before = a_zone(periods, lights=[201], presence_devices=[101], lux=None)
+    before.ingest_presence(101, True, base)
+    cleared = base + dt.timedelta(seconds=83)  # 07:27:23
+    before.ingest_presence(101, False, cleared)
+    before.evaluate(cleared, "presence edge")
+
+    vacant_at = cleared + dt.timedelta(seconds=900)  # 07:42:23, Early's hold
+    move = before.evaluate(vacant_at, "early hold expired")
+    assert move is not None and move.to_state is ZoneState.VACANT, (
+        "precondition: the zone must already be VACANT before the restart"
+    )
+
+    record = persist.to_persisted(before)
+
+    # The plugin restarts a few seconds later -- well before the 08:00
+    # boundary -- and a fresh Zone is built and restored from the record.
+    restart_at = vacant_at + dt.timedelta(seconds=5)
+    after = a_zone(periods, lights=[201], presence_devices=[101], lux=None)
+    assert persist.apply_persisted(after, record, restart_at) == []
+
+    boundary = dt.datetime(2026, 9, 15, 8, 0, 0)
+    move = after.evaluate(boundary, "period boundary")
+    assert move is not None and move.to_state is ZoneState.VACANT, (
+        "the restart lost the vacant confirmation and Working Day's longer "
+        "hold revived the stale 07:27:23 sighting as OCCUPIED"
+    )
     assert after.presence.last_input_id is None

@@ -327,8 +327,13 @@ class Zone:
         """The presence hold in force at ``now``: the active period's if it
         sets one, else the zone's (PRD section 5.4). The hold judged is
         always the one for the period active AT ``now``, not the one active
-        when presence was last seen, so it can lengthen or shorten at a
-        period boundary.
+        when presence was last seen, so it can lengthen or shorten a hold
+        that is still running at a period boundary. It never revives a hold
+        that has already run out: once :class:`~lamplighter.presence.Presence`
+        has judged a sighting's hold expired, that sighting stays expired --
+        see its module docstring (issue #15) -- so a vacant room does not
+        turn its lights back on for nobody just because the next period's
+        hold is longer.
         """
         return self._hold_for(self.active_period(now))
 
@@ -813,9 +818,23 @@ class Zone:
         # point: there is no hold to expire until the room clears. Scheduling
         # one anyway is how a zone on a level sensor wakes up in the middle
         # of somebody sitting still and puts itself VACANT.
-        hold_expiry = self.presence.expiry(self.hold_seconds(now))
-        if hold_expiry is not None:
-            candidates.append(hold_expiry)
+        #
+        # Also skipped once a real evaluation has already confirmed this
+        # sighting's hold expired (`would_be_active` false, on_devices
+        # empty): `expiry()` on its own would still add a candidate here,
+        # because it recomputes last_seen + hold_seconds(now) and a period
+        # boundary can make that land in the future even though the hold it
+        # actually ran under already expired. Waking for that is not wrong
+        # -- Presence.active would correctly stay vacant -- but it is a
+        # pointless wake, and a boundary crossed while VACANT should cost
+        # nothing (issue #15). `expiry()` itself is left alone: the override
+        # unlock-on-leave math (`_released_by_leaving`) needs the real past
+        # expiry moment even after it has been confirmed vacant.
+        hold_seconds = self.hold_seconds(now)
+        if self.presence.would_be_active(now, hold_seconds):
+            hold_expiry = self.presence.expiry(hold_seconds)
+            if hold_expiry is not None:
+                candidates.append(hold_expiry)
         if self.override is not None:
             candidates.append(self.override.expires_at)
         boundary = periods_module.next_boundary(self.config.periods, now, self.sun)
@@ -902,18 +921,21 @@ class Zone:
         it stands **now**, because that is the only honest answer available:
         nobody knows whether the room will be occupied at midnight.
 
-        Nothing here writes, evaluates, reconciles or moves a counter. Three
+        Nothing here writes, evaluates, reconciles or moves a counter. Four
         of the pieces it needs are hazardous asked the ordinary way and each
-        has a read-only twin: :meth:`would_be_dark` rather than
-        :meth:`is_dark`, which would advance the hysteresis band;
-        :meth:`override_holds_at` rather than ``_age_override``, which would
-        release a live lock; and :meth:`_plan_for` rather than
-        :meth:`desired_levels`, which reads the state the zone is actually
-        in. Getting any of those wrong makes *asking* a question change the
-        answer -- the one failure a dry run must not have.
+        has a read-only twin: :meth:`~lamplighter.presence.Presence.would_be_active`
+        rather than :meth:`~lamplighter.presence.Presence.active`, which would
+        confirm a hold expired and could revive on a later real evaluation's
+        boundary (issue #15); :meth:`would_be_dark` rather than :meth:`is_dark`,
+        which would advance the hysteresis band; :meth:`override_holds_at`
+        rather than ``_age_override``, which would release a live lock; and
+        :meth:`_plan_for` rather than :meth:`desired_levels`, which reads the
+        state the zone is actually in. Getting any of those wrong makes
+        *asking* a question change the answer -- the one failure a dry run
+        must not have.
         """
         period = self.active_period(at)
-        presence_active = self.presence.active(at, self._hold_for(period))
+        presence_active = self.presence.would_be_active(at, self._hold_for(period))
         dark = self.would_be_dark()
         overridden = self.override_holds_at(at, presence_active)
         off_duty = self._off_duty_reason(period, dark)

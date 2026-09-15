@@ -572,6 +572,134 @@ def test_dry_run_uses_the_period_hold():
     assert zone.state is ZoneState.OCCUPIED
 
 
+def _dining_room_boundary_scenario():
+    """The Dining Room reproduction from issue #15 (2026-09-15), driven up
+    to the moment the zone has genuinely gone VACANT under Early's hold.
+
+    07:26 presence, cleared 07:27:23, Early's 900 s hold runs out at
+    07:42:23 with nobody having come back. Working Day (08:00-, hold
+    3600 s) starts at 08:00. Returns ``(zone, boundary)``.
+    """
+    base = dt.datetime(2026, 9, 15, 7, 26, 0)
+    zone = make_zone(
+        [
+            make_period("Early", "07:00", "08:00", levels={"201": 60}, hold_seconds=900),
+            make_period(
+                "Working Day", "08:00", "22:00", levels={"201": 60}, hold_seconds=3600
+            ),
+        ],
+        logger=LOG,
+        lights=[201],
+        presence_devices=[101],
+        hold_seconds=1800,  # the zone's own value -- neither period's
+        lux=None,
+    )
+    zone.ingest_presence(101, True, base)
+    cleared = base + dt.timedelta(seconds=83)  # 07:27:23
+    zone.ingest_presence(101, False, cleared)
+    assert zone.evaluate(cleared, "presence edge").to_state is ZoneState.OCCUPIED
+
+    vacant_at = cleared + dt.timedelta(seconds=900)  # 07:42:23, Early's hold
+    move = zone.evaluate(vacant_at, "early hold expired")
+    assert move is not None and (move.from_state, move.to_state) == (
+        ZoneState.OCCUPIED,
+        ZoneState.VACANT,
+    ), "precondition: the zone must already be VACANT before the boundary"
+
+    return zone, dt.datetime(2026, 9, 15, 8, 0, 0)
+
+
+def test_a_boundary_never_revives_a_hold_that_has_already_expired():
+    """Issue #15: a zone already VACANT (Early's 900 s hold expired at
+    07:42:23 with nobody back) must not be re-judged OCCUPIED just because
+    the period boundary at 08:00 hands it Working Day's longer 3600 s hold
+    measured against the same stale 07:27:23 sighting. A boundary may still
+    lengthen or shorten a hold that is still RUNNING
+    (test_the_hold_of_the_period_active_now_is_the_one_judged) -- it must
+    never revive one that has already run out.
+
+    Mutation applied: Zone.evaluate (via Presence.active) judging
+    presence purely from `now - last_seen < hold_seconds(now)`, with no
+    memory that this same last_seen was already judged expired -- i.e.
+    dropping Presence's `confirmed_vacant_last_seen` check.
+    """
+    zone, boundary = _dining_room_boundary_scenario()
+
+    assert zone.evaluate(boundary, "period boundary") is None, (
+        "Working Day's longer hold revived the stale 07:27:23 sighting"
+    )
+    assert zone.state is ZoneState.VACANT
+
+
+def test_dry_run_agrees_the_boundary_does_not_revive_an_expired_hold():
+    """dry_run must not disagree with evaluate at the same boundary -- the
+    MCP `lamplighter_explain` tool asks dry_run on Simon's behalf, and a
+    caller told OCCUPIED while the real zone is VACANT is being lied to.
+
+    Mutation applied: Zone.dry_run reading the confirming `Presence.active`
+    instead of the read-only `Presence.would_be_active`, which would make
+    asking the question change the zone's own remembered vacancy.
+    """
+    zone, boundary = _dining_room_boundary_scenario()
+
+    report = zone.dry_run(boundary)
+    assert report.state is ZoneState.VACANT
+
+    # Asking did not decide anything either: the live zone is unmoved, and a
+    # real evaluation right after still agrees.
+    assert zone.state is ZoneState.VACANT
+    assert zone.evaluate(boundary, "period boundary") is None
+    assert zone.state is ZoneState.VACANT
+
+
+def test_a_fresh_sighting_after_the_vacant_transition_still_occupies():
+    """The fix must not overcorrect: presence seen again after the zone went
+    VACANT is real presence, boundary or not.
+
+    Mutation applied: any change that makes `confirmed_vacant_last_seen`
+    stick past a new sighting -- e.g. Presence.update failing to move
+    `last_seen` on the "on" edge, which is what the confirmation is
+    compared against.
+    """
+    zone, boundary = _dining_room_boundary_scenario()
+    assert zone.evaluate(boundary, "period boundary") is None
+    assert zone.state is ZoneState.VACANT
+
+    new_sighting = dt.datetime(2026, 9, 15, 8, 11, 0)
+    zone.ingest_presence(101, True, new_sighting)
+    move = zone.evaluate(new_sighting, "presence edge")
+    assert move is not None and (move.from_state, move.to_state) == (
+        ZoneState.VACANT,
+        ZoneState.OCCUPIED,
+    )
+
+
+def test_a_confirmed_vacancy_does_not_schedule_a_pointless_hold_wake():
+    """next_wake must not offer a wake-up for a hold that has already been
+    confirmed expired, just because Working Day's longer hold, recomputed
+    against the stale 07:27:23 sighting, lands in the future (08:27:23).
+    That wake would be harmless -- a real evaluation there would correctly
+    stay VACANT -- but it is a wasted worker pass for a boundary that should
+    cost nothing once the zone is VACANT (issue #15).
+
+    Mutation applied: Zone.next_wake adding `presence.expiry(hold_seconds)`
+    unconditionally, without gating it on `presence.would_be_active` first.
+    """
+    zone, boundary = _dining_room_boundary_scenario()
+    assert zone.evaluate(boundary, "period boundary") is None
+    assert zone.state is ZoneState.VACANT
+
+    stale_hold_expiry = dt.datetime(2026, 9, 15, 8, 27, 23)  # 07:27:23 + 3600s
+    wake = zone.next_wake(boundary)
+    assert wake != stale_hold_expiry, (
+        "a pointless wake was scheduled for the stale sighting's recomputed "
+        "-- and already confirmed expired -- hold"
+    )
+    # The only real things left to wake for: Working Day ending, or
+    # midnight for the counters.
+    assert wake == dt.datetime(2026, 9, 15, 22, 0)
+
+
 def test_a_period_hold_longer_than_the_zone_hold_keeps_the_room_occupied_past_the_zone_hold():
     """A period hold LONGER than the zone's is honoured in full -- the PRD's
     motivating case is a long seated-working-day hold on a period over a

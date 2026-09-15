@@ -869,9 +869,13 @@ class Engine:
                     self._record(self.history.record_light, zone.name, now, device_id, level)
 
         if readable:
+            # would_be_active, not active: a debug line must not itself
+            # confirm a hold expired ahead of the zone's first real
+            # evaluation (issue #15) -- see Presence.active vs
+            # Presence.would_be_active.
             self.logger.debug(
                 f"{zone.name}: inputs seeded from the devices themselves -- presence "
-                f"{'active' if zone.presence.active(now, zone.hold_seconds(now)) else 'inactive'}"
+                f"{'active' if zone.presence.would_be_active(now, zone.hold_seconds(now)) else 'inactive'}"
                 f" (last seen {zone.presence.last_seen or 'never'}), "
                 f"lux {zone.lux.value if zone.lux.value is not None else 'unread'}"
             )

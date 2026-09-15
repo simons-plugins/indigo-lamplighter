@@ -135,6 +135,11 @@
                 <TriggerLabel>Persisted: Presence Last Seen</TriggerLabel>
                 <ControlPageLabel>Persisted: Presence Last Seen</ControlPageLabel>
             </State>
+            <State id="persist_presence_confirmed_vacant_last_seen">
+                <ValueType>String</ValueType>
+                <TriggerLabel>Persisted: Presence Confirmed Vacant Last Seen</TriggerLabel>
+                <ControlPageLabel>Persisted: Presence Confirmed Vacant Last Seen</ControlPageLabel>
+            </State>
             <State id="persist_dark">
                 <ValueType>String</ValueType>
                 <TriggerLabel>Persisted: Dark Verdict</TriggerLabel>
