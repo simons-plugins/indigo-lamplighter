@@ -213,6 +213,11 @@ def rebuild_zone(old_zone: Zone, new_config, now: dt.datetime) -> Zone:
         for input_id, value in old_zone.presence.last_value.items()
         if input_id in still_configured
     }
+    fresh.presence.unreachable = {
+        dev_id: text
+        for dev_id, text in old_zone.presence.unreachable.items()
+        if dev_id in new_config.presence_devices
+    }
     if old_zone.presence.last_input_id in still_configured:
         fresh.presence.last_input_id = old_zone.presence.last_input_id
     fresh.plugin_enabled = old_zone.plugin_enabled

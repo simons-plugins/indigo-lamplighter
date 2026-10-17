@@ -211,15 +211,20 @@ def warn_once(logger, key, message) -> bool:
     return True
 
 
-def reset_warnings(key=None) -> None:
+def reset_warnings(key=None) -> bool:
     """Forget one warning key, or all of them when ``key`` is None.
 
     Called when a condition clears: the sensor answered, the device reported.
     The next failure of that same condition warns again, because a warning
     that latches forever hides the second outage as thoroughly as no warning
     at all hides the first.
+
+    Returns True if ``key`` was actually being held, so a caller can log a
+    one-off "recovered" line exactly when a warned condition clears.
     """
     if key is None:
         _WARNED.clear()
-    else:
-        _WARNED.discard(key)
+        return False
+    was_warned = key in _WARNED
+    _WARNED.discard(key)
+    return was_warned

@@ -1029,10 +1029,20 @@ class Zone:
             names = ", ".join(
                 self._presence_label(input_id) for input_id in sorted(self.presence.on_devices)
             )
-            return f"{names} on"
-        if self.presence.last_seen is None:
-            return "never seen"
-        return f"hold, last seen {self.presence.last_seen:%H:%M:%S}"
+            phrase = f"{names} on"
+        elif self.presence.last_seen is None:
+            phrase = "" if self.presence.unreachable else "never seen"
+        else:
+            phrase = f"hold, last seen {self.presence.last_seen:%H:%M:%S}"
+        if self.presence.unreachable:
+            # Named, like lux STALE: an ignored input is a degradation the
+            # reader must be able to see, not a quiet "inactive".
+            ignored = ", ".join(
+                f"{self._presence_label(input_id)} unreachable, ignored"
+                for input_id in sorted(self.presence.unreachable)
+            )
+            phrase = f"{phrase}; {ignored}" if phrase else ignored
+        return phrase
 
     def _lux_phrase(self, now: dt.datetime, dark: bool) -> str:
         if self.config.lux is None:
@@ -1192,12 +1202,17 @@ class Zone:
         return json.dumps(entries)
 
     def _presence_input_entry(self, input_id, kind: str) -> dict:
-        return {
+        entry = {
             "id": input_id,
             "kind": kind,
             "on": self.presence.last_value.get(input_id),
             "last": input_id == self.presence.last_input_id,
         }
+        if input_id in self.presence.unreachable:
+            # Only present when true, so every existing payload (and a page
+            # that predates the key) is unchanged; `on` is False for it.
+            entry["unreachable"] = True
+        return entry
 
 
 def _device_label(dev_id) -> str:

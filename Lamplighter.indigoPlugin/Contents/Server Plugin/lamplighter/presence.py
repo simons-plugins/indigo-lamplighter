@@ -140,6 +140,10 @@ class Presence:
         #: to, so the status page can point at "the one that last mattered"
         #: without parsing the ``last_trigger`` cause string back into an id.
         self.last_input_id = last_input_id
+        #: Device id -> Indigo ``errorState`` text, for presence devices that
+        #: are currently unreachable and therefore ignored as absent. Status
+        #: and explain bookkeeping only, like ``last_value``: never persisted.
+        self.unreachable = {}
 
     def update(self, device_id, is_on: bool, now: dt.datetime) -> Edge:
         """Feed one presence reading in; say what kind of edge it was."""

@@ -165,6 +165,30 @@ def presence_state_is_on(value, on_when) -> bool:
     return str(value).strip().lower() == str(on_when).strip().lower()
 
 
+def presence_unreachable(device) -> str:
+    """The device's Indigo ``errorState`` text, or "" when it has none.
+
+    A positive fact from Indigo that the device has dropped off (a Matter or
+    Zigbee sensor that lost its node, say) and that every value it still
+    carries is frozen at whatever it last said. That is NOT the same thing as
+    an :class:`UnknownPresence`: there the device did not give us a value and
+    "unknown must not become off", so the last reading stands. Here the value
+    is present but known to be stale, and trusting it is how a sensor frozen
+    at "on" held the Kitchen occupied for 26 hours. So an unreachable device
+    contributes no presence -- it reads as off -- and this is checked BEFORE
+    the declared state is read.
+    """
+    text = getattr(device, "errorState", "") or ""
+    return str(text).strip()
+
+
+#: Marks an unreachable device's reading. Goes into the tuple
+#: :func:`presence_reading` returns so the change-gate in
+#: :meth:`Engine._presence_changed` sees an update where only ``errorState``
+#: moved -- the states are frozen, which is the whole problem.
+_UNREACHABLE = "__unreachable__"
+
+
 def presence_reading(device, declared=None) -> tuple:
     """The part of a presence device the zone actually reads.
 
@@ -184,6 +208,11 @@ def presence_reading(device, declared=None) -> tuple:
     A device with no states mapping is read as an empty one rather than
     raising: an unreadable snapshot must not take the callback thread down.
     """
+    unreachable = presence_unreachable(device)
+    if unreachable:
+        # Before the declared-state read, so a frozen or missing state on a
+        # device Indigo already says is gone cannot raise UnknownPresence.
+        return (_UNREACHABLE, unreachable)
     states = getattr(device, "states", None) or {}
     if declared is not None:
         device_id = getattr(device, "id", None)
@@ -273,6 +302,8 @@ def presence_is_on(device, declared=None) -> bool:
     occupied.
     """
     reading = presence_reading(device, declared)
+    if reading and reading[0] == _UNREACHABLE:
+        return False
     if declared is not None:
         return presence_state_is_on(reading[0], declared.on_when)
     return any(bool(value) for value in reading if value is not None)
@@ -338,6 +369,11 @@ def warn_unknown_presence_once(logger, zone_name, exc, note="") -> bool:
         f"{zone_name}: presence input {exc.device_id} is UNKNOWN, not off -- "
         f"{exc}. {exc.consequence}{(' ' + note) if note else ''}",
     )
+
+
+def _unreachable_presence_key(zone_name, device_id):
+    """One unreachable warning per zone and device."""
+    return ("presence-unreachable", zone_name, device_id)
 
 
 class Engine:
@@ -490,10 +526,39 @@ class Engine:
         name = getattr(current_dev, "name", None) or f"device {device_id}"
         return self._mark_dirty(zone, f"override: {name}", kind="override")
 
+    def _note_reachability(self, zone, device) -> str:
+        """Record, and log once per transition, whether a presence device is reachable.
+
+        Returns the ``errorState`` text ("" when reachable). WARNING once when
+        it goes unreachable, INFO once when it recovers; not on every
+        evaluation (the warn-once key is held while it stays unreachable).
+        """
+        device_id = device.id
+        key = _unreachable_presence_key(zone.name, device_id)
+        name = getattr(device, "name", None) or f"device {device_id}"
+        text = presence_unreachable(device)
+        if text:
+            zone.presence.unreachable[device_id] = text
+            compare.warn_once(
+                self.logger,
+                key,
+                f"{zone.name}: presence device {name} ({device_id}) is unreachable "
+                f"(errorState {text!r}); ignoring it as absent until it recovers.",
+            )
+        else:
+            zone.presence.unreachable.pop(device_id, None)
+            if compare.reset_warnings(key):
+                self.logger.info(
+                    f"{zone.name}: presence device {name} ({device_id}) is reachable "
+                    "again; reading it normally."
+                )
+        return text
+
     def _presence_changed(self, zone, previous_dev, current_dev, now):
         """Presence, gated on the reading rather than on the event (R4)."""
         device_id = current_dev.id
         declared = zone.config.presence_input(device_id)
+        unreachable = self._note_reachability(zone, current_dev)
         try:
             reading = presence_reading(current_dev, declared)
         except UnknownPresence as exc:
@@ -524,7 +589,7 @@ class Engine:
         # No before-state means there is nothing to compare, and suppressing a
         # re-plan on a comparison that could not be made is a lights-never-
         # respond failure. The gate does not apply rather than guessing.
-        if declared is not None:
+        if declared is not None and not unreachable:
             compare.reset_warnings(
                 _unknown_presence_key(zone.name, device_id, declared.state)
             )
@@ -755,6 +820,13 @@ class Engine:
                 continue
             devices.forget_warnings(device_id)
             declared = zone.config.presence_input(device_id)
+            if self._note_reachability(zone, device):
+                # Unreachable is an answer ("off"), not an unknown: Indigo says
+                # the device is gone, so the zone seeds without it and is
+                # never left unseeded waiting for it. See presence_unreachable.
+                answered += 1
+                zone.presence.last_value[device_id] = False
+                continue
             try:
                 is_on = presence_is_on(device, declared)
             except PresenceStateUnreadable as exc:
