@@ -946,6 +946,8 @@ class Zone:
             f"lux={self._lux_phrase(now, dark)}",
             f"override={self.override.device_id if self.override else 'none'}",
         ]
+        if self.presence_blind():
+            parts.append("no reachable presence input (the zone will go vacant regardless of occupancy)")
         if self._unavailable:
             parts.append(
                 "unavailable lights="
@@ -1031,7 +1033,7 @@ class Zone:
             )
             phrase = f"{names} on"
         elif self.presence.last_seen is None:
-            phrase = "" if self.presence.unreachable else "never seen"
+            phrase = "" if self.presence.unreachable or self.presence.awaiting else "never seen"
         else:
             phrase = f"hold, last seen {self.presence.last_seen:%H:%M:%S}"
         if self.presence.unreachable:
@@ -1042,7 +1044,21 @@ class Zone:
                 for input_id in sorted(self.presence.unreachable)
             )
             phrase = f"{phrase}; {ignored}" if phrase else ignored
+        if self.presence.awaiting:
+            waiting = ", ".join(
+                f"{self._presence_label(input_id)} reachable again, waiting for a fresh report"
+                for input_id in sorted(self.presence.awaiting)
+            )
+            phrase = f"{phrase}; {waiting}" if phrase else waiting
         return phrase
+
+    def presence_blind(self) -> bool:
+        """True when no presence input can count: all unreachable or awaiting a report."""
+        inputs = list(self.config.presence_devices) + list(self.config.presence_variables)
+        return bool(inputs) and all(
+            input_id in self.presence.unreachable or input_id in self.presence.awaiting
+            for input_id in inputs
+        )
 
     def _lux_phrase(self, now: dt.datetime, dark: bool) -> str:
         if self.config.lux is None:

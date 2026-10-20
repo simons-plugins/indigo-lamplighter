@@ -228,3 +228,13 @@ def reset_warnings(key=None) -> bool:
     was_warned = key in _WARNED
     _WARNED.discard(key)
     return was_warned
+
+
+def reset_warnings_with_prefix(prefix: tuple) -> None:
+    """Forget every warning key that starts with ``prefix``.
+
+    For a condition whose key carries a value the clearing side no longer
+    knows (an error text that has just gone away).
+    """
+    for key in [k for k in _WARNED if isinstance(k, tuple) and k[: len(prefix)] == prefix]:
+        _WARNED.discard(key)

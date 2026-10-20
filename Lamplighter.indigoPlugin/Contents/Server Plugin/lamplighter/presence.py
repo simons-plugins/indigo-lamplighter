@@ -142,8 +142,18 @@ class Presence:
         self.last_input_id = last_input_id
         #: Device id -> Indigo ``errorState`` text, for presence devices that
         #: are currently unreachable and therefore ignored as absent. Status
-        #: and explain bookkeeping only, like ``last_value``: never persisted.
+        #: and explain bookkeeping only, like ``last_value``: not persisted to
+        #: disk, but carried across a hot reload by ``persist.rebuild_zone``.
         self.unreachable = {}
+        #: Device id -> the reading it carried when it dropped (a sentinel if
+        #: that reading was unknown). indigo-matter clears ``errorState`` on
+        #: recovery without updating any state, so the states are still the
+        #: frozen ones; this is what recovery compares against.
+        self.frozen = {}
+        #: Device id -> the reading it recovered with, for devices that came
+        #: back reachable showing exactly what they were frozen at. Held
+        #: absent until the reading differs. Same lifetime as ``unreachable``.
+        self.awaiting = {}
 
     def update(self, device_id, is_on: bool, now: dt.datetime) -> Edge:
         """Feed one presence reading in; say what kind of edge it was."""
