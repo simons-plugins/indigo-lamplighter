@@ -236,5 +236,5 @@ def reset_warnings_with_prefix(prefix: tuple) -> None:
     For a condition whose key carries a value the clearing side no longer
     knows (an error text that has just gone away).
     """
-    for key in [k for k in _WARNED if isinstance(k, tuple) and k[: len(prefix)] == prefix]:
+    for key in [k for k in list(_WARNED) if isinstance(k, tuple) and k[: len(prefix)] == prefix]:
         _WARNED.discard(key)
