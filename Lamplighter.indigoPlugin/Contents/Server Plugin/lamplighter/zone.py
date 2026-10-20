@@ -946,6 +946,8 @@ class Zone:
             f"lux={self._lux_phrase(now, dark)}",
             f"override={self.override.device_id if self.override else 'none'}",
         ]
+        if self.presence_blind():
+            parts.append("no reachable presence input (the zone will go vacant regardless of occupancy)")
         if self._unavailable:
             parts.append(
                 "unavailable lights="
@@ -1029,10 +1031,34 @@ class Zone:
             names = ", ".join(
                 self._presence_label(input_id) for input_id in sorted(self.presence.on_devices)
             )
-            return f"{names} on"
-        if self.presence.last_seen is None:
-            return "never seen"
-        return f"hold, last seen {self.presence.last_seen:%H:%M:%S}"
+            phrase = f"{names} on"
+        elif self.presence.last_seen is None:
+            phrase = "" if self.presence.unreachable or self.presence.awaiting else "never seen"
+        else:
+            phrase = f"hold, last seen {self.presence.last_seen:%H:%M:%S}"
+        if self.presence.unreachable:
+            # Named, like lux STALE: an ignored input is a degradation the
+            # reader must be able to see, not a quiet "inactive".
+            ignored = ", ".join(
+                f"{self._presence_label(input_id)} unreachable, ignored"
+                for input_id in sorted(self.presence.unreachable)
+            )
+            phrase = f"{phrase}; {ignored}" if phrase else ignored
+        if self.presence.awaiting:
+            waiting = ", ".join(
+                f"{self._presence_label(input_id)} reachable again, waiting for a fresh report"
+                for input_id in sorted(self.presence.awaiting)
+            )
+            phrase = f"{phrase}; {waiting}" if phrase else waiting
+        return phrase
+
+    def presence_blind(self) -> bool:
+        """True when no presence input can count: all unreachable or awaiting a report."""
+        inputs = list(self.config.presence_devices) + list(self.config.presence_variables)
+        return bool(inputs) and all(
+            input_id in self.presence.unreachable or input_id in self.presence.awaiting
+            for input_id in inputs
+        )
 
     def _lux_phrase(self, now: dt.datetime, dark: bool) -> str:
         if self.config.lux is None:
@@ -1192,12 +1218,17 @@ class Zone:
         return json.dumps(entries)
 
     def _presence_input_entry(self, input_id, kind: str) -> dict:
-        return {
+        entry = {
             "id": input_id,
             "kind": kind,
             "on": self.presence.last_value.get(input_id),
             "last": input_id == self.presence.last_input_id,
         }
+        if input_id in self.presence.unreachable:
+            # Only present when true, so every existing payload (and a page
+            # that predates the key) is unchanged; `on` is False for it.
+            entry["unreachable"] = True
+        return entry
 
 
 def _device_label(dev_id) -> str:
