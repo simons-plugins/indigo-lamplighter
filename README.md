@@ -116,7 +116,7 @@ installed.
 Updating an installed plugin: copy the changed files into
 
 ```
-/Library/Application Support/Perceptive Automation/Indigo 2025.2/Plugins/Lamplighter.indigoPlugin/Contents/Server Plugin/
+/Library/Application Support/Perceptive Automation/Indigo 2026.1/Plugins/Lamplighter.indigoPlugin/Contents/Server Plugin/
 ```
 
 and reload the plugin (Plugins → Lamplighter → Reload). States added by a
@@ -148,10 +148,10 @@ contract whoever writes it:
 <Indigo install folder>/Preferences/Plugins/com.simons-plugins.indigo-lamplighter/lamplighter.json
 ```
 
-which on a stock 2025.2 server is
+which on a stock 2026.1 server is
 
 ```
-/Library/Application Support/Perceptive Automation/Indigo 2025.2/Preferences/Plugins/com.simons-plugins.indigo-lamplighter/lamplighter.json
+/Library/Application Support/Perceptive Automation/Indigo 2026.1/Preferences/Plugins/com.simons-plugins.indigo-lamplighter/lamplighter.json
 ```
 
 The plugin writes `{"version": 1, "zones": []}` there if the file is missing,
