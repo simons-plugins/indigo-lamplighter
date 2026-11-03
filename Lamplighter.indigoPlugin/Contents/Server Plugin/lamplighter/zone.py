@@ -350,8 +350,10 @@ class Zone:
         longer hold, measured against the same stale ``last_seen``, is never
         consulted once an earlier, shorter one has already run out (issue
         #15). A hold still running when its boundary arrives instead
-        lengthens or shortens under the next period exactly as before -- the
-        walk simply carries on into that stretch.
+        lengthens or shortens under the next period -- the walk carries on
+        into that stretch -- but a shorter hold there can end it no earlier
+        than the boundary itself, never at a moment inside the period
+        before it (2026-11-03).
 
         Stateless: nothing is remembered between calls, so a dry run and a
         real evaluation asking this at the same moment always agree, and a
@@ -367,7 +369,13 @@ class Zone:
             return None
         t = last_seen
         while True:
-            candidate = self.presence.expiry(self._hold_for(self.active_period(t)))
+            # A stretch's hold is measured from last_seen, but it cannot
+            # expire before the stretch itself begins: a later period's
+            # shorter hold cuts a running hold short AT that period's
+            # start, never retroactively inside the period before it
+            # (Dining Room, 2026-11-03: Evening's 900 s measured against a
+            # 15:25 Working Day sighting must give 17:00, not 15:40).
+            candidate = max(t, self.presence.expiry(self._hold_for(self.active_period(t))))
             boundary = periods_module.next_boundary(self.config.periods, t, self.sun)
             if boundary is None or candidate <= boundary:
                 return candidate

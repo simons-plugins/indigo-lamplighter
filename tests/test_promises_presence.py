@@ -1089,3 +1089,78 @@ def test_unlock_on_leave_fires_at_the_period_hold_expiry():
         ZoneState.OVERRIDDEN, ZoneState.VACANT
     ), "the override was never released on leave under the period hold"
     assert zone.override is None
+
+
+def _working_day_evening_zone():
+    """The Dining Room as configured on 2026-10-30: Working Day (08:00-17:00,
+    hold 7200 s) then Evening (17:00-23:00, hold 900 s). The shape the
+    2026-11-03 defect was found in: a sighting after 15:00 whose two-hour
+    hold would outlast the 17:00 boundary.
+    """
+    return make_zone(
+        [
+            make_period("Working Day", "08:00", "17:00", levels={"201": 100}, hold_seconds=7200),
+            make_period("Evening", "17:00", "23:00", levels={"201": 50}, hold_seconds=900),
+        ],
+        logger=LOG,
+        lights=[201],
+        presence_devices=[101],
+        hold_seconds=3600,  # the zone's own value -- deliberately neither period's
+        lux=None,
+    )
+
+
+def test_a_shorter_hold_in_the_next_period_cannot_expire_a_sighting_before_that_period_begins():
+    """2026-11-03, Dining Room: a 15:25:53 sighting under Working Day's
+    7200 s hold would run to 17:25:53, past the 17:00 boundary into
+    Evening's 900 s hold. The walk in `presence_expiry` then measured
+    Evening's 900 s against the same 15:25:53 sighting and answered
+    15:40:53 -- an expiry BEFORE the period whose hold produced it had even
+    begun, so the room went dark after fifteen minutes with Working Day
+    still active. A later period's shorter hold may cut a running hold
+    short, but no earlier than the moment that period starts: the expiry
+    is 17:00:00, not 15:40:53.
+
+    Mutation applied: Zone.presence_expiry's per-stretch candidate
+    `max(t, last_seen + hold)` -> `last_seen + hold`, the pre-fix
+    arithmetic, which lets a later stretch's hold land its expiry inside an
+    earlier stretch.
+    """
+    zone = _working_day_evening_zone()
+    seen = dt.datetime(2026, 11, 3, 15, 25, 53)
+    zone.ingest_presence(101, True, seen)
+    zone.ingest_presence(101, False, seen)
+    assert zone.evaluate(seen, "presence edge").to_state is ZoneState.OCCUPIED
+
+    boundary = dt.datetime(2026, 11, 3, 17, 0, 0)
+    assert zone.presence_expiry() == boundary
+    assert zone.next_wake(seen) == boundary, "the worker must not wake at 15:40:53 to turn the room off"
+
+    at_1540 = seen + dt.timedelta(seconds=900)
+    assert zone.evaluate(at_1540, "fifteen minutes on") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+    assert zone.evaluate(boundary - dt.timedelta(seconds=1), "last second of Working Day") is None
+    assert zone.state is ZoneState.OCCUPIED
+
+    move = zone.evaluate(boundary, "period boundary")
+    assert (move.from_state, move.to_state) == (ZoneState.OCCUPIED, ZoneState.VACANT)
+
+
+def test_dry_run_agrees_a_shorter_next_hold_waits_for_its_period():
+    """`lamplighter_explain` at 15:45 on the same sighting must say OCCUPIED
+    under Working Day -- which is exactly what Simon's dry run at 17:15 on
+    2026-11-03 reported while the live zone had already gone VACANT at
+    15:40:53. The two must agree because they share `presence_expiry`.
+
+    Mutation applied: as the previous test; dry_run reads the same walk.
+    """
+    zone = _working_day_evening_zone()
+    seen = dt.datetime(2026, 11, 3, 15, 25, 53)
+    zone.ingest_presence(101, True, seen)
+    zone.ingest_presence(101, False, seen)
+    zone.evaluate(seen, "presence edge")
+
+    report = zone.dry_run(dt.datetime(2026, 11, 3, 15, 45, 0))
+    assert report.state is ZoneState.OCCUPIED
+    assert zone.dry_run(dt.datetime(2026, 11, 3, 17, 0, 0)).state is ZoneState.VACANT
