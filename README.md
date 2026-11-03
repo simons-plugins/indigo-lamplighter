@@ -148,7 +148,7 @@ contract whoever writes it:
 <Indigo install folder>/Preferences/Plugins/com.simons-plugins.indigo-lamplighter/lamplighter.json
 ```
 
-which on a stock 2025.2 server is
+which on a stock 2026.1 server is
 
 ```
 /Library/Application Support/Perceptive Automation/Indigo 2026.1/Preferences/Plugins/com.simons-plugins.indigo-lamplighter/lamplighter.json
