@@ -350,8 +350,10 @@ class Zone:
         longer hold, measured against the same stale ``last_seen``, is never
         consulted once an earlier, shorter one has already run out (issue
         #15). A hold still running when its boundary arrives instead
-        lengthens or shortens under the next period exactly as before -- the
-        walk simply carries on into that stretch.
+        lengthens or shortens under the next period -- the walk carries on
+        into that stretch -- but a shorter hold there can end it no earlier
+        than the boundary itself, never at a moment inside the period
+        before it (2026-11-03).
 
         Stateless: nothing is remembered between calls, so a dry run and a
         real evaluation asking this at the same moment always agree, and a
@@ -367,7 +369,13 @@ class Zone:
             return None
         t = last_seen
         while True:
-            candidate = self.presence.expiry(self._hold_for(self.active_period(t)))
+            # A stretch's hold is measured from last_seen, but it cannot
+            # expire before the stretch itself begins: a later period's
+            # shorter hold cuts a running hold short AT that period's
+            # start, never retroactively inside the period before it
+            # (Dining Room, 2026-11-03: Evening's 900 s measured against a
+            # 15:25 Working Day sighting must give 17:00, not 15:40).
+            candidate = max(t, self.presence.expiry(self._hold_for(self.active_period(t))))
             boundary = periods_module.next_boundary(self.config.periods, t, self.sun)
             if boundary is None or candidate <= boundary:
                 return candidate
@@ -946,6 +954,8 @@ class Zone:
             f"lux={self._lux_phrase(now, dark)}",
             f"override={self.override.device_id if self.override else 'none'}",
         ]
+        if self.presence_blind():
+            parts.append("no reachable presence input (the zone will go vacant regardless of occupancy)")
         if self._unavailable:
             parts.append(
                 "unavailable lights="
@@ -1029,10 +1039,34 @@ class Zone:
             names = ", ".join(
                 self._presence_label(input_id) for input_id in sorted(self.presence.on_devices)
             )
-            return f"{names} on"
-        if self.presence.last_seen is None:
-            return "never seen"
-        return f"hold, last seen {self.presence.last_seen:%H:%M:%S}"
+            phrase = f"{names} on"
+        elif self.presence.last_seen is None:
+            phrase = "" if self.presence.unreachable or self.presence.awaiting else "never seen"
+        else:
+            phrase = f"hold, last seen {self.presence.last_seen:%H:%M:%S}"
+        if self.presence.unreachable:
+            # Named, like lux STALE: an ignored input is a degradation the
+            # reader must be able to see, not a quiet "inactive".
+            ignored = ", ".join(
+                f"{self._presence_label(input_id)} unreachable, ignored"
+                for input_id in sorted(self.presence.unreachable)
+            )
+            phrase = f"{phrase}; {ignored}" if phrase else ignored
+        if self.presence.awaiting:
+            waiting = ", ".join(
+                f"{self._presence_label(input_id)} reachable again, waiting for a fresh report"
+                for input_id in sorted(self.presence.awaiting)
+            )
+            phrase = f"{phrase}; {waiting}" if phrase else waiting
+        return phrase
+
+    def presence_blind(self) -> bool:
+        """True when no presence input can count: all unreachable or awaiting a report."""
+        inputs = list(self.config.presence_devices) + list(self.config.presence_variables)
+        return bool(inputs) and all(
+            input_id in self.presence.unreachable or input_id in self.presence.awaiting
+            for input_id in inputs
+        )
 
     def _lux_phrase(self, now: dt.datetime, dark: bool) -> str:
         if self.config.lux is None:
@@ -1192,12 +1226,17 @@ class Zone:
         return json.dumps(entries)
 
     def _presence_input_entry(self, input_id, kind: str) -> dict:
-        return {
+        entry = {
             "id": input_id,
             "kind": kind,
             "on": self.presence.last_value.get(input_id),
             "last": input_id == self.presence.last_input_id,
         }
+        if input_id in self.presence.unreachable:
+            # Only present when true, so every existing payload (and a page
+            # that predates the key) is unchanged; `on` is False for it.
+            entry["unreachable"] = True
+        return entry
 
 
 def _device_label(dev_id) -> str:
